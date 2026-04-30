@@ -54,23 +54,11 @@ impl EguiCandidateApp {
 
 impl App for EguiCandidateApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let mut had_update = false;
         while let Ok(update) = self.receiver.try_recv() {
             self.state.apply_update(update);
-            had_update = true;
         }
 
-        // Only repaint frequently when updates are arriving; slow poll when idle
-        let interval = if had_update {
-            std::time::Duration::from_millis(50)
-        } else {
-            std::time::Duration::from_millis(200)
-        };
-        ctx.request_repaint_after(interval);
-
-        if self.state.visible {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.render_candidates(ui);

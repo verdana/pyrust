@@ -285,6 +285,9 @@ fn dev_input_loop(tx: &Sender<Request>) {
             true
         };
 
+        // Reset engine before new input
+        let _ = tx.send(Request::Reset);
+
         for ch in line.chars() {
             let vk = match ch {
                 'a'..='z' => ch as u32 - 0x20,
@@ -295,11 +298,6 @@ fn dev_input_loop(tx: &Sender<Request>) {
             if !send_key(vk) {
                 return;
             }
-        }
-
-        // Enter key to reset buffer after each line
-        if !send_key(0x0D) {
-            return;
         }
 
         // Brief pause for worker to process
