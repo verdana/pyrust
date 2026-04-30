@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/yas-config",
+    "crates/dict",
+    "crates/engine-core",
+    "crates/platform-adapter",
+    "crates/ui-crate",
+    "inputd",
+    "dict-compiler",
+]

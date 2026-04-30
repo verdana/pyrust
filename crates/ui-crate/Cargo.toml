@@ -1,0 +1,13 @@
+[package]
+name = "ui-crate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+engine-core = { path = "../engine-core" }
+yas-config = { path = "../yas-config" }
+eframe = "0.27"
+egui = "0.27"
+crossbeam-channel = "0.5"
+log = "0.4"
+winit = "0.29"

@@ -1,0 +1,12 @@
+[package]
+name = "dict"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+yas-config = { path = "../yas-config" }
+serde = { version = "1", features = ["derive"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+lru = "0.12"
+log = "0.4"
+memmap2 = "0.9"

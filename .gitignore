@@ -1,0 +1,8 @@
+/target/
+**/*.rs.bk
+*.pdb
+*.exe
+user.db
+*.dict
+*.dat
+.omc/

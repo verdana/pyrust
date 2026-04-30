@@ -1,0 +1,16 @@
+[package]
+name = "inputd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+yas-config = { path = "../crates/yas-config" }
+dict = { path = "../crates/dict" }
+engine-core = { path = "../crates/engine-core" }
+platform-adapter = { path = "../crates/platform-adapter" }
+ui-crate = { path = "../crates/ui-crate" }
+crossbeam-channel = "0.5"
+log = "0.4"
+anyhow = "1"
+notify = "6"
+directories = "5"
