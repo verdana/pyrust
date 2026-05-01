@@ -4,9 +4,4 @@
 *.exe
 user.db
 *.dict
-*.dat
 .omc/
-*.dict
-*.dat
-*.dict
-*.dat
