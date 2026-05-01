@@ -1,9 +1,38 @@
 use windows::core::{GUID, HRESULT, Interface};
-use windows::Win32::Foundation::{S_OK, S_FALSE};
+use windows::Win32::Foundation::{BOOL, HINSTANCE, S_FALSE, S_OK};
 use windows::Win32::System::Com::IClassFactory;
+use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 
 use crate::registry::{register_tip, unregister_tip, CLSID_PYRUST_TIP};
 use crate::tip::{DLL_REF_COUNT, PyrustClassFactory};
+
+static mut DLL_HINSTANCE: HINSTANCE = HINSTANCE(0);
+
+#[no_mangle]
+extern "system" fn DllMain(
+    hinst: HINSTANCE,
+    reason: u32,
+    _reserved: *mut std::ffi::c_void,
+) -> BOOL {
+    if reason == 1 {
+        // DLL_PROCESS_ATTACH
+        unsafe { DLL_HINSTANCE = hinst; }
+    }
+    BOOL(1)
+}
+
+pub fn get_dll_path() -> Result<String, String> {
+    let hinst = unsafe { DLL_HINSTANCE };
+    if hinst.is_invalid() {
+        return Err("DLL HINSTANCE not set".into());
+    }
+    let mut buf = vec![0u16; 260];
+    let len = unsafe { GetModuleFileNameW(hinst, &mut buf) as usize };
+    if len == 0 || len >= buf.len() {
+        return Err("GetModuleFileNameW failed".into());
+    }
+    String::from_utf16(&buf[..len]).map_err(|e| format!("UTF-16 decode failed: {e}"))
+}
 
 #[no_mangle]
 extern "system" fn DllGetClassObject(

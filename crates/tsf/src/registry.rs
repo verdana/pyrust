@@ -108,9 +108,7 @@ pub fn register_tip() -> Result<(), String> {
     let cat_kbd_str = guid_to_string(&CATEGORY_KEYBOARD);
     let cat_prof_str = guid_to_string(&CATEGORY_PROFILE);
 
-    let dll_path = std::env::current_exe()
-        .map_err(|e| format!("Cannot get DLL path: {e}"))?;
-    let dll_path_str = dll_path.to_string_lossy().to_string();
+    let dll_path_str = crate::dll_exports::get_dll_path()?;
 
     unsafe {
         let com_key = format!("SOFTWARE\\Classes\\CLSID\\{}", clsid_str);
