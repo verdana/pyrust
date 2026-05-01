@@ -147,7 +147,8 @@ bigram_data_path = "bigram.dat"
 - [x] 配置热重载
 - [x] 10 万基础词库
 - [x] Windows TSF Phase 1 — DLL 编译 + COM 接口实现
-- [ ] Windows TSF — 系统键盘列表注册
+- [x] Windows TSF — 系统键盘列表注册（COM Profile，IME 出现在列表中但切换后消失，需修复 DLL 路径）
+- [ ] Windows TSF — 修复 DLL 路径 + 输入法可用
 - [ ] macOS Input Method Kit 接入
 - [ ] 集成测试
 
