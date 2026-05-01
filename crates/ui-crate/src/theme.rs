@@ -20,12 +20,12 @@ impl ThemeColors {
 
     fn light() -> Self {
         Self {
-            background: [1.0, 1.0, 1.0, 0.95],
-            text: [0.0, 0.0, 0.0, 1.0],
-            candidate_bg: [0.95, 0.95, 0.95, 1.0],
-            candidate_selected_bg: [0.8, 0.9, 1.0, 1.0],
-            pinyin_text: [0.4, 0.4, 0.4, 1.0],
-            border: [0.8, 0.8, 0.8, 1.0],
+            background: [0.18, 0.18, 0.18, 0.95],
+            text: [1.0, 1.0, 1.0, 1.0],
+            candidate_bg: [0.22, 0.22, 0.22, 1.0],
+            candidate_selected_bg: [0.25, 0.35, 0.5, 1.0],
+            pinyin_text: [0.7, 0.7, 0.7, 1.0],
+            border: [0.35, 0.35, 0.35, 1.0],
         }
     }
 
