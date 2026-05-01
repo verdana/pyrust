@@ -155,24 +155,32 @@ fn char_code(b: u8) -> u8 {
 }
 
 /// Estimate initial capacity for base/check arrays.
+/// Uses total child count + 50% overhead to keep arrays compact.
 fn estimate_capacity(nodes: &[TrieNode]) -> usize {
-    let trie_count = nodes.len();
-    let max_code = 37usize;
-    let estimated = (trie_count * (max_code + 1)).max(1024);
+    let total_children: usize = nodes.iter().map(|n| n.children.len()).sum();
+    let estimated = (total_children + total_children / 2).max(1024);
     estimated.next_power_of_two()
 }
 
 /// Find a base value `b` such that `b + code` is a free slot for each child.
+/// Returns a base that allows out-of-bounds positions to trigger caller resize.
 fn find_free_base(codes: &[u8], check: &[i32]) -> i32 {
     if codes.is_empty() {
         return 0;
     }
 
+    // Sort codes so smaller values (a, b, c...) get placed first
+    let max_code = *codes.iter().max().unwrap() as usize;
     let mut base = 1i32;
     'search: loop {
+        // If base + max_code would exceed capacity, return this base
+        // to let the caller resize — avoids scanning past bounds
+        if (base as usize) + max_code >= check.len() {
+            return base;
+        }
         for &code in codes {
             let pos = (base as usize) + (code as usize);
-            if pos >= check.len() || check[pos] >= 0 {
+            if check[pos] >= 0 {
                 base += 1;
                 continue 'search;
             }
