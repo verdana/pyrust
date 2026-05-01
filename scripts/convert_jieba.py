@@ -39,8 +39,8 @@ def main():
     total = len(entries)
     skipped = 0
     for i, (word, freq) in enumerate(entries):
-        # pypinyin with TONE3 style: ni3, hao3, etc.
-        py_list = pinyin(word, style=Style.TONE3, heteronym=False)
+        # pypinyin NORMAL style: ni, hao (no tones, matching engine lookup format)
+        py_list = pinyin(word, style=Style.NORMAL, heteronym=False)
         valid = True
         syllables = []
         for p in py_list:
