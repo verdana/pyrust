@@ -48,6 +48,8 @@ pub enum Action {
     Passthrough,
     Commit(String),
     UpdateCandidates,
+    UpdatePreedit { text: String, cursor: usize },
+    ClearPreedit,
     Noop,
     ToggleMode,
 }

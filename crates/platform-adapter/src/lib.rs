@@ -1,10 +1,24 @@
 use engine_core::{Action, Modifiers};
 
 pub trait ImeBackend: Send {
+    // --- Existing (required) ---
     fn initialize(&mut self) -> Result<(), ImeError>;
     fn handle_key_event(&mut self, vk: u32, modifiers: Modifiers) -> Action;
     fn commit(&self, text: &str);
     fn set_candidate_position(&self, x: i32, y: i32);
+
+    // --- New: Composition / Preedit (Phase 2) ---
+    fn update_preedit(&self, _text: &str, _cursor_pos: usize) {}
+    fn clear_preedit(&self) {}
+
+    // --- New: Activation lifecycle ---
+    fn activate(&mut self) -> Result<(), ImeError> { Ok(()) }
+    fn deactivate(&mut self) -> Result<(), ImeError> { Ok(()) }
+    fn is_active(&self) -> bool { false }
+
+    // --- New: Focus / Context ---
+    fn on_focus_change(&mut self, _gained: bool) {}
+    fn is_password_field(&self) -> bool { false }
 }
 
 #[derive(Debug, thiserror::Error)]

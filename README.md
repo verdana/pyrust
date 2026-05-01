@@ -5,6 +5,7 @@
 ## 特性
 
 - **三线程架构**：系统回调、工作逻辑、UI 渲染完全分离，打字永不卡顿
+- **横版候选窗**：微信输入法风格，dark/light 双主题，hover 高亮，点击选词
 - **完全离线**：零网络依赖，所有词库本地存储，隐私零泄露
 - **10 万基础词库**：基于结巴分词词频数据，覆盖日常用词
 - **上文联想**：基于 Bigram 模型的上下文候选词加分
@@ -21,6 +22,7 @@
 | 词库存储 | mmap Double-Array Trie (DAT) |
 | 个人词库 | SQLite |
 | UI 渲染 | egui + winit |
+| Windows IME | TSF (Text Services Framework) via windows-rs |
 | 配置 | TOML |
 
 ## 项目结构
@@ -32,40 +34,57 @@ pyrust/
 │   ├── dict/             # 词库引擎：mmap DAT 读取、用户词库
 │   ├── ui-crate/         # egui 候选词窗口渲染
 │   ├── platform-adapter/ # 操作系统 IME 接入层
+│   ├── tsf/              # Windows TSF COM DLL (cdylib)
 │   └── yas-config/       # 全局配置管理
 ├── dict-compiler/        # 离线词库编译工具
-├── pyrust/               # 二进制入口
+├── pyrust/               # 二进制入口 (dev EXE)
 ├── scripts/              # 辅助脚本（词库生成等）
 └── assets/               # 基础数据文件
 ```
 
 ## 构建
 
+### 开发模式 (跨平台)
+
 ```bash
-# 编译
 cargo build --release
-
-# 运行
 cargo run --release
-
-# 编译词库（从 jieba 词表生成）
-python3 scripts/convert_jieba.py /path/to/jieba_dict.txt 100000 > assets/words.txt
-cargo run -p dict-compiler -- --input assets/words.txt --output base.dict
-
-# 生成上文联想数据
-python3 scripts/generate_bigram.py /path/to/jieba_dict.txt bigram.dat
 ```
 
-### Windows 构建
+### Windows TSF 输入法 DLL
 
 ```powershell
-# 运行 build.ps1
-.\build.ps1
+# 在 Windows 上
+cd crates\tsf
+cargo build --release
+
+# 注册（管理员）
+regsvr32 target\release\tsf.dll
+
+# 卸载
+regsvr32 /u target\release\tsf.dll
+```
+
+### 交叉编译 Windows EXE (从 Linux/WSL)
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+# Arch: sudo pacman -S mingw-w64-gcc
+
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+### 词库编译
+
+```bash
+python3 scripts/convert_jieba.py /path/to/jieba_dict.txt 100000 > assets/words.txt
+cargo run -p dict-compiler -- --input assets/words.txt --output base.dict
+python3 scripts/generate_bigram.py /path/to/jieba_dict.txt bigram.dat
 ```
 
 ## 使用
 
-### 开发模式
+### 开发模式 (dev_input_loop)
 
 ```bash
 cargo run --release
@@ -79,17 +98,29 @@ cargo run --release
 > q              # 退出
 ```
 
-### 配置文件
+### 系统输入法 (Windows TSF)
+
+1. 以管理员运行 `regsvr32 tsf.dll` 注册
+2. Windows 设置 → 时间和语言 → 语言 → 添加键盘 → pyrust Pinyin
+3. Win+Space 切换到 pyrust，在任意应用中输入
+
+## 配置文件
 
 `~/.config/pyrust/config.toml` (Linux) / `%APPDATA%\pyrust\config.toml` (Windows):
 
 ```toml
 [general]
-mode = "zh"           # zh / en
+mode = "zh"
 
 [engine]
-fuzzy_pinyin = false  # 启用模糊音
-enable_bigram = true   # 启用上文联想
+fuzzy_pinyin = false
+enable_bigram = true
+
+[ui]
+font_size = 18
+font_family = ""
+theme = "auto"         # light / dark / auto
+max_candidates = 5
 
 [dict]
 base_dict_path = "base.dict"
@@ -109,13 +140,14 @@ bigram_data_path = "bigram.dat"
 
 - [x] 拼音引擎核心（状态机、音节切分、候选排序）
 - [x] mmap 词库（DAT 编译与加载）
-- [x] egui 候选词窗口
+- [x] egui 候选词窗口（横版、dark/light、hover、点击选词）
 - [x] 个人词库（SQLite 持久化）
 - [x] 上文联想 (Bigram)
 - [x] 模糊音（8 组规则）
 - [x] 配置热重载
 - [x] 10 万基础词库
-- [ ] Windows TSF 系统输入法接入
+- [x] Windows TSF Phase 1 — DLL 编译 + COM 接口实现
+- [ ] Windows TSF — 系统键盘列表注册
 - [ ] macOS Input Method Kit 接入
 - [ ] 集成测试
 
