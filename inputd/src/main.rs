@@ -261,10 +261,15 @@ fn dev_input_loop(tx: &Sender<Request>) {
         let _ = io::stdout().flush();
 
         let mut line = String::new();
-        if stdin.lock().read_line(&mut line).is_err() || line.trim() == "quit" {
+        match stdin.lock().read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let line = line.trim();
+        if line.eq_ignore_ascii_case("quit") || line.eq_ignore_ascii_case("q") {
             break;
         }
-        let line = line.trim().to_lowercase();
+        let line = line.to_lowercase();
         if line.is_empty() {
             continue;
         }
