@@ -1,14 +1,20 @@
 use windows::core::{GUID, HSTRING};
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Registry::{
-    RegCreateKeyW, RegSetValueExW, RegCloseKey, HKEY_LOCAL_MACHINE,
-    REG_SZ,
+    RegCreateKeyW, RegSetValueExW, RegCloseKey, HKEY_LOCAL_MACHINE, REG_SZ,
 };
-use windows::Win32::Foundation::WIN32_ERROR;
+use windows::Win32::Foundation::{BOOL, WIN32_ERROR};
+use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
+use windows::Win32::UI::TextServices::ITfInputProcessorProfileMgr;
 
 pub const CLSID_PYRUST_TIP: GUID = GUID::from_u128(0xD4B3_C2A1_9F8E_7D6C_5B4A3928174655AA);
 pub const PROFILE_GUID: GUID = GUID::from_u128(0xE5C4_B3A2_0F9E_8D7C_6B5A4938271655BB);
 pub const CATEGORY_KEYBOARD: GUID = GUID::from_u128(0x34745C63_B2F0_4784_8B67_5E12C8701A31);
 pub const CATEGORY_PROFILE: GUID = GUID::from_u128(0xB814541B_44C3_41CC_927B_34E2BD6DC7C5);
+
+const CLSID_TF_INPUTPROCESSORPROFILES: GUID =
+    GUID::from_u128(0x33C53A50_F456_4884_B049_85FD643ECFED);
+const LANG_CHINESE_SIMPLIFIED: u16 = 0x0804;
 
 fn guid_to_string(g: &GUID) -> String {
     format!(
@@ -58,6 +64,44 @@ unsafe fn reg_set_value(key_path: &str, name: &str, value: &str) -> Result<(), S
     Ok(())
 }
 
+fn register_profile_via_com() -> Result<(), String> {
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
+            .map_err(|e| format!("CoInitializeEx failed: {:?}", e))?;
+
+        let result = (|| -> Result<(), String> {
+            let ppm: ITfInputProcessorProfileMgr = CoCreateInstance(
+                &CLSID_TF_INPUTPROCESSORPROFILES,
+                None,
+                CLSCTX_INPROC_SERVER,
+            ).map_err(|e| format!("CoCreateInstance failed: {e}"))?;
+
+            let desc_h = HSTRING::from("pyrust Pinyin");
+            let icon_empty: &[u16] = &[];
+
+            ppm.RegisterProfile(
+                &CLSID_PYRUST_TIP,
+                LANG_CHINESE_SIMPLIFIED,
+                &PROFILE_GUID,
+                desc_h.as_wide(),
+                icon_empty,
+                0u32,
+                HKL::default(),
+                0u32,
+                BOOL(1),
+                0u32,
+            ).map_err(|e| format!("RegisterProfile failed: {e}"))?;
+
+            log::info!("[tsf] Profile registered via COM");
+            Ok(())
+        })();
+
+        CoUninitialize();
+        result
+    }
+}
+
 pub fn register_tip() -> Result<(), String> {
     let clsid_str = guid_to_string(&CLSID_PYRUST_TIP);
     let profile_str = guid_to_string(&PROFILE_GUID);
@@ -90,14 +134,39 @@ pub fn register_tip() -> Result<(), String> {
         reg_create(&prof_key, "pyrust Pinyin")?;
     }
 
-    log::info!("[tsf] Registry registration complete");
+    log::info!("[tsf] Registry keys written");
+
+    register_profile_via_com()?;
+
     Ok(())
 }
 
 pub fn unregister_tip() -> Result<(), String> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let result = (|| -> Result<(), String> {
+            let ppm: ITfInputProcessorProfileMgr = CoCreateInstance(
+                &CLSID_TF_INPUTPROCESSORPROFILES,
+                None,
+                CLSCTX_INPROC_SERVER,
+            ).map_err(|e| format!("CoCreateInstance failed: {e}"))?;
+            ppm.UnregisterProfile(
+                &CLSID_PYRUST_TIP,
+                LANG_CHINESE_SIMPLIFIED,
+                &PROFILE_GUID,
+                0,
+            ).map_err(|e| format!("UnregisterProfile failed: {e}"))?;
+            Ok(())
+        })();
+        CoUninitialize();
+        if let Err(e) = result {
+            log::warn!("[tsf] COM unregister warning: {}", e);
+        }
+    }
+
     let clsid_str = guid_to_string(&CLSID_PYRUST_TIP);
     let tip_key = format!("SOFTWARE\\Microsoft\\CTF\\TIP\\{}", clsid_str);
     let com_key = format!("SOFTWARE\\Classes\\CLSID\\{}", clsid_str);
-    log::info!("[tsf] Unregister. Remove keys manually if needed:\n  {}\n  {}", tip_key, com_key);
+    log::info!("[tsf] Unregister complete. Remove keys manually if needed:\n  {}\n  {}", tip_key, com_key);
     Ok(())
 }
