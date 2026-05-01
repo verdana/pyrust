@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert jieba dictionary to inputd word list format with pinyin."""
+"""Convert jieba dictionary to pyrust word list format with pinyin."""
 
 import sys
 from pypinyin import pinyin, Style

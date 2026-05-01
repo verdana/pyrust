@@ -1,4 +1,4 @@
-# inputd
+# pyrust
 
 个人拼音输入法 — 追求极致性能、完全隐私可控的跨平台输入法引擎。
 
@@ -26,7 +26,7 @@
 ## 项目结构
 
 ```
-inputd/
+pyrust/
 ├── crates/
 │   ├── engine-core/      # 拼音引擎核心：状态机、切分、排序
 │   ├── dict/             # 词库引擎：mmap DAT 读取、用户词库
@@ -34,7 +34,7 @@ inputd/
 │   ├── platform-adapter/ # 操作系统 IME 接入层
 │   └── yas-config/       # 全局配置管理
 ├── dict-compiler/        # 离线词库编译工具
-├── inputd/               # 二进制入口
+├── pyrust/               # 二进制入口
 ├── scripts/              # 辅助脚本（词库生成等）
 └── assets/               # 基础数据文件
 ```
@@ -81,7 +81,7 @@ cargo run --release
 
 ### 配置文件
 
-`~/.config/inputd/config.toml` (Linux) / `%APPDATA%\inputd\config.toml` (Windows):
+`~/.config/pyrust/config.toml` (Linux) / `%APPDATA%\pyrust\config.toml` (Windows):
 
 ```toml
 [general]

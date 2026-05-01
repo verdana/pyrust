@@ -43,7 +43,7 @@ impl Config {
 fn config_path() -> PathBuf {
     if let Some(base) = directories::BaseDirs::new() {
         let mut path = base.config_dir().to_path_buf();
-        path.push("inputd");
+        path.push("pyrust");
         path.push("config.toml");
         path
     } else {

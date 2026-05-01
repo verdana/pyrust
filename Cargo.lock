@@ -1826,22 +1826,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inputd"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossbeam-channel",
- "dict",
- "directories",
- "engine-core",
- "log",
- "notify",
- "platform-adapter",
- "ui-crate",
- "yas-config",
-]
-
-[[package]]
 name = "instant"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2646,6 +2630,22 @@ name = "profiling"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eb8486b569e12e2c32ad3e204dbaba5e4b5b216e9367044f25f1dba42341773"
+
+[[package]]
+name = "pyrust"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossbeam-channel",
+ "dict",
+ "directories",
+ "engine-core",
+ "log",
+ "notify",
+ "platform-adapter",
+ "ui-crate",
+ "yas-config",
+]
 
 [[package]]
 name = "quick-xml"

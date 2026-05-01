@@ -41,6 +41,7 @@ pub struct UiConfig {
     pub font_family: String,
     pub theme: Theme,
     pub max_candidates: usize,
+    /// Deprecated: layout is always horizontal. This field is ignored.
     pub vertical: bool,
 }
 
@@ -306,5 +307,74 @@ impl From<&UiConfig> for RawUiConfig {
             max_candidates: cfg.max_candidates,
             vertical: cfg.vertical,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ui_config_defaults() {
+        let c = UiConfig::default();
+        assert_eq!(c.font_size, 18);
+        assert_eq!(c.font_family, "");
+        assert_eq!(c.theme, Theme::Auto);
+        assert_eq!(c.max_candidates, 5);
+        assert!(!c.vertical);
+    }
+
+    #[test]
+    fn theme_from_string() {
+        let raw = RawUiConfig { theme: "light".into(), ..Default::default() };
+        assert_eq!(UiConfig::from(raw).theme, Theme::Light);
+
+        let raw = RawUiConfig { theme: "dark".into(), ..Default::default() };
+        assert_eq!(UiConfig::from(raw).theme, Theme::Dark);
+
+        let raw = RawUiConfig { theme: "unknown".into(), ..Default::default() };
+        assert_eq!(UiConfig::from(raw).theme, Theme::Auto);
+    }
+
+    #[test]
+    fn ui_config_zero_defaults() {
+        let raw = RawUiConfig { font_size: 0, max_candidates: 0, ..Default::default() };
+        let cfg = UiConfig::from(raw);
+        assert_eq!(cfg.font_size, 18);
+        assert_eq!(cfg.max_candidates, 5);
+    }
+
+    #[test]
+    fn ui_config_roundtrip() {
+        let cfg = UiConfig {
+            font_size: 24,
+            font_family: "SimSun".into(),
+            theme: Theme::Dark,
+            max_candidates: 9,
+            vertical: false,
+        };
+        let raw = RawUiConfig::from(&cfg);
+        let roundtripped = UiConfig::from(raw);
+        assert_eq!(roundtripped.font_size, 24);
+        assert_eq!(roundtripped.font_family, "SimSun");
+        assert_eq!(roundtripped.theme, Theme::Dark);
+        assert_eq!(roundtripped.max_candidates, 9);
+    }
+
+    #[test]
+    fn toml_parse_ui_section() {
+        let toml_str = r#"
+[ui]
+font_size = 22
+font_family = "Fira Code"
+theme = "dark"
+max_candidates = 7
+"#;
+        let raw: RawConfig = toml::from_str(toml_str).unwrap();
+        let cfg = UiConfig::from(raw.ui);
+        assert_eq!(cfg.font_size, 22);
+        assert_eq!(cfg.font_family, "Fira Code");
+        assert_eq!(cfg.theme, Theme::Dark);
+        assert_eq!(cfg.max_candidates, 7);
     }
 }

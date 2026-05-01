@@ -6,6 +6,6 @@ members = [
     "crates/engine-core",
     "crates/platform-adapter",
     "crates/ui-crate",
-    "inputd",
+    "pyrust",
     "dict-compiler",
 ]

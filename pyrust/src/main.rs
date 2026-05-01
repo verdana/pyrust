@@ -14,6 +14,7 @@ use dict::dat_dict::MmapDict;
 use dict::user_dict::UserDict;
 use dict::DictSource;
 use engine_core::{BigramModel, EngineCore, KeyEvent, Modifiers};
+use ui_crate::UiAction;
 use yas_config::Config;
 
 // Channel types for the 3-thread architecture:
@@ -82,7 +83,7 @@ mod oneshot {
 fn main() -> Result<()> {
     logger::init();
 
-    log::info!("inputd v{}", env!("CARGO_PKG_VERSION"));
+    log::info!("pyrust v{}", env!("CARGO_PKG_VERSION"));
 
     let config = Arc::new(Config::load());
 
@@ -116,6 +117,9 @@ fn main() -> Result<()> {
     let (req_tx, req_rx) = unbounded::<Request>();
     let (ui_tx, ui_rx) = unbounded::<ui_crate::UiUpdate>();
 
+    // UI → worker back-channel
+    let (action_tx, action_rx) = unbounded::<UiAction>();
+
     // Start config hot-reload watcher
     let config_path = config_path();
     if let Err(e) = start_config_watcher(&config_path, &req_tx) {
@@ -137,24 +141,43 @@ fn main() -> Result<()> {
         })
         .context("failed to spawn worker thread")?;
 
-    // Spawn UI thread (stub for Phase 1)
+    // Spawn action forwarder: UiAction from UI → Request to worker
+    let action_req_tx = req_tx.clone();
+    thread::Builder::new()
+        .name("action-forwarder".into())
+        .spawn(move || {
+            for action in action_rx {
+                match action {
+                    UiAction::SelectCandidate(idx) => {
+                        let (resp_tx, _) = oneshot::channel();
+                        let _ = action_req_tx.send(Request::SelectCandidate { index: idx, response: resp_tx });
+                    }
+                    UiAction::NextPage | UiAction::PrevPage => {
+                        // Future: page navigation
+                    }
+                }
+            }
+        })
+        .context("failed to spawn action-forwarder thread")?;
+
+    // Spawn UI thread
     let ui_config = Arc::clone(&config);
     let ui_handle = thread::Builder::new()
         .name("ui".into())
         .spawn(move || {
-            ui_loop(&ui_rx, ui_config);
+            ui_loop(&ui_rx, ui_config, action_tx);
         })
         .context("failed to spawn UI thread")?;
 
     // Platform thread (main thread)
-    log::info!("inputd ready. Type 'quit' to exit.");
+    log::info!("pyrust ready. Type 'quit' to exit.");
     dev_input_loop(&req_tx);
 
     // Shutdown
     let _ = req_tx.send(Request::Shutdown);
     worker_handle.join().map_err(|_| anyhow!("worker thread panic"))?;
     ui_handle.join().map_err(|_| anyhow!("UI thread panic"))?;
-    log::info!("inputd shutdown complete");
+    log::info!("pyrust shutdown complete");
     Ok(())
 }
 
@@ -236,7 +259,11 @@ fn send_ui_update(engine: &EngineCore, ui_tx: &Sender<ui_crate::UiUpdate>) {
     }
 }
 
-fn ui_loop(rx: &Receiver<ui_crate::UiUpdate>, config: Arc<Config>) {
+fn ui_loop(
+    rx: &Receiver<ui_crate::UiUpdate>,
+    config: Arc<Config>,
+    action_tx: Sender<UiAction>,
+) {
     log::info!("UI thread starting...");
     let ui_config = yas_config::UiConfig {
         font_size: config.ui.font_size,
@@ -246,7 +273,7 @@ fn ui_loop(rx: &Receiver<ui_crate::UiUpdate>, config: Arc<Config>) {
         vertical: config.ui.vertical,
     };
     log::info!("UI config created, calling run_ui_window...");
-    ui_crate::window::run_ui_window(ui_config, rx.clone());
+    ui_crate::window::run_ui_window(ui_config, rx.clone(), action_tx);
     log::info!("UI thread exiting");
 }
 
@@ -340,7 +367,7 @@ fn config_path() -> PathBuf {
     } else {
         PathBuf::from(".")
     };
-    path.push("inputd");
+    path.push("pyrust");
     path.push("config.toml");
     path
 }

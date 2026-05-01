@@ -20,8 +20,10 @@ pub struct UiCandidate {
     pub index: usize,
 }
 
-pub enum UiCommand {
-    Show(UiUpdate),
-    Hide,
-    Quit,
+/// Actions the UI thread sends back to the worker thread.
+#[derive(Debug, Clone)]
+pub enum UiAction {
+    SelectCandidate(usize),
+    NextPage,
+    PrevPage,
 }
