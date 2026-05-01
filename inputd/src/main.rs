@@ -39,6 +39,7 @@ pub enum Request {
 pub enum Response {
     Consumed,
     Passthrough,
+    Committed(String),
 }
 
 /// Lock-free oneshot channel for synchronous handoff.
@@ -178,14 +179,19 @@ fn worker_loop(
                 send_ui_update(engine, ui_tx);
                 let resp = match action {
                     engine_core::Action::Passthrough => Response::Passthrough,
+                    engine_core::Action::Commit(text) => Response::Committed(text),
                     _ => Response::Consumed,
                 };
                 response.send(resp);
             }
             Request::SelectCandidate { index, response } => {
-                let _action = engine.select_candidate(index);
+                let action = engine.select_candidate(index);
                 send_ui_update(engine, ui_tx);
-                response.send(Response::Consumed);
+                let resp = match action {
+                    engine_core::Action::Commit(text) => Response::Committed(text),
+                    _ => Response::Consumed,
+                };
+                response.send(resp);
             }
             Request::Reset => {
                 engine.reset();
@@ -248,9 +254,10 @@ fn dev_input_loop(tx: &Sender<Request>) {
     use std::io::{self, BufRead, Write};
 
     let stdin = io::stdin();
+    println!("  pinyin → type  1-9 → select  reset | zh/en | quit");
 
     loop {
-        print!("inputd> ");
+        print!("> ");
         let _ = io::stdout().flush();
 
         let mut line = String::new();
@@ -258,50 +265,66 @@ fn dev_input_loop(tx: &Sender<Request>) {
             break;
         }
         let line = line.trim().to_lowercase();
-
-        if line == "reset" {
-            let _ = tx.send(Request::Reset);
+        if line.is_empty() {
             continue;
         }
 
+        // --- Commands ---
+        if line == "reset" {
+            let _ = tx.send(Request::Reset);
+            eprintln!("[reset]");
+            continue;
+        }
         if line == "zh" || line == "en" {
             let _ = tx.send(Request::ToggleMode);
             continue;
         }
 
-        let send_key = |vk: u32| -> bool {
+        // --- Candidate selection: single digit 1-9 ---
+        if line.len() == 1 {
+            if let Some(d) = line.chars().next() {
+                if ('1'..='9').contains(&d) {
+                    let idx = (d as usize) - ('1' as usize);
+                    let (resp_tx, resp_rx) = oneshot::channel();
+                    if tx
+                        .send(Request::SelectCandidate { index: idx, response: resp_tx })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if let Response::Committed(text) = resp_rx.recv() {
+                        eprintln!("  => {}", text);
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // --- Pinyin input ---
+        let _ = tx.send(Request::Reset);
+
+        let send_key = |vk: u32| -> Option<Response> {
             let (resp_tx, resp_rx) = oneshot::channel();
             if tx
-                .send(Request::KeyPress {
-                    vk,
-                    modifiers: Modifiers::default(),
-                    response: resp_tx,
-                })
+                .send(Request::KeyPress { vk, modifiers: Modifiers::default(), response: resp_tx })
                 .is_err()
             {
-                return false;
+                return None;
             }
-            let _ = resp_rx.recv();
-            true
+            Some(resp_rx.recv())
         };
-
-        // Reset engine before new input
-        let _ = tx.send(Request::Reset);
 
         for ch in line.chars() {
             let vk = match ch {
                 'a'..='z' => ch as u32 - 0x20,
-                ' ' => 0x20,
-                '1'..='9' => ch as u32,
                 _ => continue,
             };
-            if !send_key(vk) {
-                return;
+            if let Some(Response::Committed(text)) = send_key(vk) {
+                eprintln!("  => {}", text);
             }
         }
 
-        // Brief pause for worker to process
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(30));
     }
 }
 
