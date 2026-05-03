@@ -1,6 +1,6 @@
 use std::io::Write;
 use windows::core::{GUID, HRESULT, Interface};
-use windows::Win32::Foundation::{BOOL, HINSTANCE, S_FALSE, S_OK};
+use windows::Win32::Foundation::{HMODULE, S_FALSE, S_OK};
 use windows::Win32::System::Com::IClassFactory;
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 
@@ -18,21 +18,21 @@ fn dll_log(msg: &str) {
     }
 }
 
-static mut DLL_HINSTANCE: HINSTANCE = HINSTANCE(std::ptr::null_mut());
+static mut DLL_HINSTANCE: HMODULE = HMODULE(std::ptr::null_mut());
 
 #[no_mangle]
 extern "system" fn DllMain(
-    hinst: HINSTANCE,
+    hinst: HMODULE,
     reason: u32,
     _reserved: *mut std::ffi::c_void,
-) -> BOOL {
+) -> bool {
     if reason == 1 {
         dll_log("[tsf] DllMain: DLL_PROCESS_ATTACH");
         unsafe { DLL_HINSTANCE = hinst; }
     } else if reason == 0 {
         dll_log("[tsf] DllMain: DLL_PROCESS_DETACH");
     }
-    BOOL(1)
+    true
 }
 
 pub fn get_dll_path() -> Result<String, String> {
@@ -41,7 +41,7 @@ pub fn get_dll_path() -> Result<String, String> {
         return Err("DLL HINSTANCE not set".into());
     }
     let mut buf = vec![0u16; 260];
-    let len = unsafe { GetModuleFileNameW(hinst, &mut buf) as usize };
+    let len = unsafe { GetModuleFileNameW(Some(hinst), &mut buf) as usize };
     if len == 0 || len >= buf.len() {
         return Err("GetModuleFileNameW failed".into());
     }

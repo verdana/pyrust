@@ -97,13 +97,13 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 详细记录见 `docs/tsf-troubleshooting.md`。
 
-### Explorer 崩溃问题（2026-05-03）
+### Explorer 崩溃问题（2026-05-03）— 已修复
 
 **现象**：切换到 pyrust 输入法时，任务栏消失后重新出现（Explorer 重启）。
 
-**可能原因**：Bridge 线程初始化（egui/winit）在 TSF 回调线程中创建窗口，或 COM 重入导致死锁。
+**根因**：Bridge 线程初始化（egui/winit）在 TSF COM 回调线程中创建窗口，导致 COM 重入死锁。
 
-**排查方向**：暂不启动 Bridge 线程测试；使用 WinDbg 捕获崩溃堆栈。
+**修复**：延迟 Bridge UI 线程初始化——仅在 Activate 中初始化 engine，不启动 egui 窗口。
 
 ### 按键不响应问题（2026-05-03）
 
@@ -111,7 +111,23 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 **可能原因**：Windows 11 25H2 的 TextInputHost 不使用传统 `ITfKeyEventSink` 路径。
 
+**已尝试的修复**：
+- 设置键盘 Compartment（`GUID_COMPARTMENT_KEYBOARD_OPENCLOSE` = 1）
+- 注册 `ITfThreadFocusSink`
+- 通过 `ITfEditSession` + `ITfRange::SetText` 提交文本
+
 **排查方向**：在稳定版 Windows 测试；研究 fcitx5-windows/Mozc 的按键处理方式。
+
+### windows-rs 升级 0.58 → 0.62（2026-05-03）
+
+**变更**：
+- `Option<&T>` 参数改为 `windows::core::Ref<'_, T>`（COM 接口方法签名变化）
+- `Win32::Foundation::BOOL` 改为 `windows::core::BOOL` 或 `bool`
+- `HINSTANCE` 改为 `HMODULE`
+- `implement` feature 不再需要显式声明（内置）
+- 新增 `Win32_System_Variant` feature（`VARIANT` 类型支持）
+
+**注意**：`crates/tsf/` 独立于 workspace，依赖版本冲突需单独管理。
 
 ## 调试经验 (Lessons Learned)
 

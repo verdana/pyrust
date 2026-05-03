@@ -19,7 +19,7 @@ log = "0.4"
 anyhow = "1"
 notify = "6"
 directories = "5"
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_UI_TextServices",
     "Win32_System_Com",
     "Win32_System_Registry",
@@ -30,6 +30,6 @@ windows = { version = "0.58", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_LibraryLoader",
-    "implement",
+    "Win32_System_Variant",
 ]}
-windows-core = "0.58"
+windows-core = "0.62"

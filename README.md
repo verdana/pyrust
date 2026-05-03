@@ -147,9 +147,12 @@ bigram_data_path = "bigram.dat"
 - [x] 配置热重载
 - [x] 10 万基础词库
 - [x] Windows TSF — DLL 编译 + COM 接口实现（ITfTextInputProcessorEx、ITfKeyEventSink 等 7 个接口）
-- [x] Windows TSF — Sink 注册（ITfThreadMgrEventSink + ITfKeyEventSink + ITfContextKeyEventSink）
+- [x] Windows TSF — Sink 注册（ITfThreadMgrEventSink + ITfKeyEventSink + ITfContextKeyEventSink + ITfThreadFocusSink）
 - [x] Windows TSF — 注册表修复（IME 可常驻 Windows 键盘列表）
-- [ ] Windows TSF — 按键路由修复 + Explorer 崩溃修复
+- [x] Windows TSF — Explorer 崩溃修复（延迟 UI 线程初始化）
+- [x] Windows TSF — 键盘 Compartment + 文本提交（ITfRange::SetText）
+- [x] Windows TSF — windows-rs 升级至 0.62
+- [ ] Windows TSF — 按键路由验证（Windows 11 25H2 兼容性）
 - [ ] macOS Input Method Kit 接入
 - [ ] 集成测试
 

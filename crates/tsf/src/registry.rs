@@ -6,7 +6,7 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Registry::{
     RegCreateKeyW, RegSetValueExW, RegCloseKey, HKEY, HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER, REG_SZ,
 };
-use windows::Win32::Foundation::{BOOL, WIN32_ERROR};
+use windows::Win32::Foundation::WIN32_ERROR;
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 use windows::Win32::UI::TextServices::{
     ITfCategoryMgr, ITfInputProcessorProfileMgr,
@@ -55,7 +55,7 @@ unsafe fn reg_create(hive: HKEY, path: &str, default_val: &str) -> Result<(), St
     let mut hkey = std::mem::zeroed();
     check(RegCreateKeyW(hive, &path_h, &mut hkey))?;
     let data: &[u8] = std::slice::from_raw_parts(val_h.as_ptr() as *const u8, val_h.len() * 2);
-    let _ = RegSetValueExW(hkey, None, 0, REG_SZ, Some(data));
+    let _ = RegSetValueExW(hkey, None, Some(0), REG_SZ, Some(data));
     let _ = RegCloseKey(hkey);
     Ok(())
 }
@@ -75,10 +75,10 @@ unsafe fn reg_set_value(hive: HKEY, key_path: &str, name: &str, value: &str) -> 
     check(RegCreateKeyW(hive, &path_h, &mut hkey))?;
     let data: &[u8] = std::slice::from_raw_parts(val_h.as_ptr() as *const u8, val_h.len() * 2);
     if name.is_empty() {
-        let _ = RegSetValueExW(hkey, None, 0, REG_SZ, Some(data));
+        let _ = RegSetValueExW(hkey, None, Some(0), REG_SZ, Some(data));
     } else {
         let name_h = HSTRING::from(name);
-        let _ = RegSetValueExW(hkey, &name_h, 0, REG_SZ, Some(data));
+        let _ = RegSetValueExW(hkey, &name_h, Some(0), REG_SZ, Some(data));
     }
     let _ = RegCloseKey(hkey);
     Ok(())
@@ -166,18 +166,20 @@ fn register_profile_via_com() -> Result<(), String> {
             reg_log("[tsf] ITfInputProcessorProfileMgr created");
 
             let desc_h = HSTRING::from(IME_DISPLAY_NAME);
+            let desc_wide: &[u16] =
+                std::slice::from_raw_parts(desc_h.as_ptr(), desc_h.len());
             let icon_empty: &[u16] = &[];
 
             ppm.RegisterProfile(
                 &CLSID_PYRUST_TIP,
                 LANG_CHINESE_SIMPLIFIED,
                 &PROFILE_GUID,
-                desc_h.as_wide(),
+                desc_wide,
                 icon_empty,
                 0u32,
                 HKL::default(),
                 0u32,
-                BOOL(1),
+                true,
                 0u32,
             ).map_err(|e| {
                 reg_log(&format!("[tsf] RegisterProfile failed: {e}"));
