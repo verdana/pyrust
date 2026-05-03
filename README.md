@@ -146,11 +146,16 @@ bigram_data_path = "bigram.dat"
 - [x] 模糊音（8 组规则）
 - [x] 配置热重载
 - [x] 10 万基础词库
-- [x] Windows TSF Phase 1 — DLL 编译 + COM 接口实现
-- [x] Windows TSF — 系统键盘列表注册（COM Profile，IME 出现在列表中但切换后消失，需修复 DLL 路径）
-- [ ] Windows TSF — 修复 DLL 路径 + 输入法可用
+- [x] Windows TSF — DLL 编译 + COM 接口实现（ITfTextInputProcessorEx、ITfKeyEventSink 等 7 个接口）
+- [x] Windows TSF — Sink 注册（ITfThreadMgrEventSink + ITfKeyEventSink + ITfContextKeyEventSink）
+- [x] Windows TSF — 注册表修复（IME 可常驻 Windows 键盘列表）
+- [ ] Windows TSF — 按键路由修复 + Explorer 崩溃修复
 - [ ] macOS Input Method Kit 接入
 - [ ] 集成测试
+
+### TSF 调试记录
+
+详细调试过程和解决方案见 `docs/tsf-troubleshooting.md`。
 
 ## 许可证
 

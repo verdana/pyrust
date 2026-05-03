@@ -1,3 +1,4 @@
+use std::io::Write;
 use windows::core::{GUID, HRESULT, Interface};
 use windows::Win32::Foundation::{BOOL, HINSTANCE, S_FALSE, S_OK};
 use windows::Win32::System::Com::IClassFactory;
@@ -6,7 +7,18 @@ use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use crate::registry::{register_tip, unregister_tip, CLSID_PYRUST_TIP};
 use crate::tip::{DLL_REF_COUNT, PyrustClassFactory};
 
-static mut DLL_HINSTANCE: HINSTANCE = HINSTANCE(0);
+fn dll_log(msg: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("C:\\Users\\Verdana\\pyrust_tsf.log")
+    {
+        let _ = writeln!(f, "{msg}");
+        let _ = f.flush();
+    }
+}
+
+static mut DLL_HINSTANCE: HINSTANCE = HINSTANCE(std::ptr::null_mut());
 
 #[no_mangle]
 extern "system" fn DllMain(
@@ -15,8 +27,10 @@ extern "system" fn DllMain(
     _reserved: *mut std::ffi::c_void,
 ) -> BOOL {
     if reason == 1 {
-        // DLL_PROCESS_ATTACH
+        dll_log("[tsf] DllMain: DLL_PROCESS_ATTACH");
         unsafe { DLL_HINSTANCE = hinst; }
+    } else if reason == 0 {
+        dll_log("[tsf] DllMain: DLL_PROCESS_DETACH");
     }
     BOOL(1)
 }
@@ -31,7 +45,9 @@ pub fn get_dll_path() -> Result<String, String> {
     if len == 0 || len >= buf.len() {
         return Err("GetModuleFileNameW failed".into());
     }
-    String::from_utf16(&buf[..len]).map_err(|e| format!("UTF-16 decode failed: {e}"))
+    let path = String::from_utf16(&buf[..len]).map_err(|e| format!("UTF-16 decode failed: {e}"))?;
+    dll_log(&format!("[tsf] DLL path: {path}"));
+    Ok(path)
 }
 
 #[no_mangle]
@@ -40,30 +56,36 @@ extern "system" fn DllGetClassObject(
     riid: *const GUID,
     ppv: *mut *mut std::ffi::c_void,
 ) -> HRESULT {
+    dll_log("[tsf] DllGetClassObject called");
     unsafe {
         if *rclsid != CLSID_PYRUST_TIP {
-            return HRESULT(0x80040111u32 as i32); // CLASS_E_CLASSNOTAVAILABLE
+            dll_log("[tsf] DllGetClassObject: wrong CLSID -> CLASS_E_CLASSNOTAVAILABLE");
+            return HRESULT(0x80040111u32 as i32);
         }
         let factory: IClassFactory = PyrustClassFactory {}.into();
-        factory.query(riid, ppv)
+        let hr = factory.query(riid, ppv);
+        dll_log(&format!("[tsf] DllGetClassObject: query returned {:?}", hr));
+        hr
     }
 }
 
 #[no_mangle]
 extern "system" fn DllCanUnloadNow() -> HRESULT {
-    if DLL_REF_COUNT.load(std::sync::atomic::Ordering::Acquire) == 0 {
-        S_OK
-    } else {
-        S_FALSE
-    }
+    let count = DLL_REF_COUNT.load(std::sync::atomic::Ordering::Acquire);
+    dll_log(&format!("[tsf] DllCanUnloadNow refcount={count}"));
+    if count == 0 { S_OK } else { S_FALSE }
 }
 
 #[no_mangle]
 extern "system" fn DllRegisterServer() -> HRESULT {
+    dll_log("[tsf] DllRegisterServer BEGIN");
     match register_tip() {
-        Ok(()) => S_OK,
+        Ok(()) => {
+            dll_log("[tsf] DllRegisterServer SUCCESS");
+            S_OK
+        }
         Err(e) => {
-            log::error!("DllRegisterServer failed: {}", e);
+            dll_log(&format!("[tsf] DllRegisterServer FAILED: {e}"));
             HRESULT(0x80004005u32 as i32)
         }
     }
@@ -71,10 +93,14 @@ extern "system" fn DllRegisterServer() -> HRESULT {
 
 #[no_mangle]
 extern "system" fn DllUnregisterServer() -> HRESULT {
+    dll_log("[tsf] DllUnregisterServer BEGIN");
     match unregister_tip() {
-        Ok(()) => S_OK,
+        Ok(()) => {
+            dll_log("[tsf] DllUnregisterServer SUCCESS");
+            S_OK
+        }
         Err(e) => {
-            log::error!("DllUnregisterServer failed: {}", e);
+            dll_log(&format!("[tsf] DllUnregisterServer FAILED: {e}"));
             HRESULT(0x80004005u32 as i32)
         }
     }
