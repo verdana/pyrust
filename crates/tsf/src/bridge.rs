@@ -27,16 +27,19 @@ pub struct TsfBridge {
     req_tx: Sender<Request>,
     edit_tx: Sender<PendingEdit>,
     _worker: thread::JoinHandle<()>,
-    _ui: thread::JoinHandle<()>,
     _forwarder: thread::JoinHandle<()>,
     _config_watcher: thread::JoinHandle<()>,
 }
 
 impl TsfBridge {
-    /// Initialize all threads and channels. Called from ITfTextInputProcessorEx::Activate.
-    pub fn initialize() -> Result<Self> {
-        // Initialize logger (file-based for DLL)
-        log::info!("[tsf] Initializing bridge...");
+    /// Initialize engine-only threads (worker + forwarder + config watcher).
+    /// Does NOT start the UI thread — creating an egui window from inside the
+    /// TSF COM callback causes COM re-entrancy deadlock → Explorer crash.
+    ///
+    /// The UI thread can be started later via `start_ui()` when it's safe to
+    /// create windows (e.g. after Activate returns).
+    pub fn initialize_engine() -> Result<Self> {
+        log::info!("[tsf] Initializing bridge (engine only, no UI)...");
 
         let config = Arc::new(Config::load());
 
@@ -62,9 +65,9 @@ impl TsfBridge {
 
         // Channels
         let (req_tx, req_rx) = unbounded::<Request>();
-        let (ui_tx, ui_rx) = unbounded::<ui_crate::UiUpdate>();
+        let (ui_tx, _ui_rx) = unbounded::<ui_crate::UiUpdate>();
         let (edit_tx, _edit_rx) = unbounded::<PendingEdit>();
-        let (action_tx, action_rx) = unbounded::<UiAction>();
+        let (_action_tx, action_rx) = unbounded::<UiAction>();
 
         // Spawn worker thread
         let worker_dict = Arc::clone(&dict);
@@ -99,23 +102,6 @@ impl TsfBridge {
                 }
             })
             .context("failed to spawn action-forwarder thread")?;
-
-        // UI thread
-        let ui_config = Arc::clone(&config);
-        let ui_action_tx = action_tx.clone();
-        let ui_handle = thread::Builder::new()
-            .name("ui".into())
-            .spawn(move || {
-                let ui_cfg = yas_config::UiConfig {
-                    font_size: ui_config.ui.font_size,
-                    font_family: ui_config.ui.font_family.clone(),
-                    theme: ui_config.ui.theme,
-                    max_candidates: ui_config.ui.max_candidates,
-                    vertical: ui_config.ui.vertical,
-                };
-                ui_crate::window::run_ui_window(ui_cfg, ui_rx, ui_action_tx);
-            })
-            .context("failed to spawn UI thread")?;
 
         // Config watcher thread
         let watcher_req_tx = req_tx.clone();
@@ -153,10 +139,9 @@ impl TsfBridge {
             .context("failed to spawn config-watcher thread")?;
 
         Ok(Self {
-            req_tx,
+            req_tx: req_tx.clone(),
             edit_tx: edit_tx.clone(),
             _worker: worker_handle,
-            _ui: ui_handle,
             _forwarder: forwarder_handle,
             _config_watcher: watcher_handle,
         })
@@ -169,12 +154,10 @@ impl TsfBridge {
     /// Queue an edit session request to be processed by TSF.
     /// Called from ITfKeyEventSink after receiving a response from the worker.
     pub fn request_edit(&self, _context: &windows::Win32::UI::TextServices::ITfContext) {
-        // Phase 1: Push commit edits to the edit channel.
-        // In Phase 2+, this will request an actual ITfEditSession.
         let _ = self.edit_tx.send(PendingEdit::CommitText(String::new()));
     }
 
-    /// Graceful shutdown: signal worker to flush and exit, then join all threads.
+    /// Graceful shutdown: signal worker to flush and exit.
     pub fn shutdown(&mut self) {
         let _ = self.req_tx.send(Request::Shutdown);
     }

@@ -169,13 +169,15 @@ impl ITfTextInputProcessor_Impl for PyrustTip_Impl {
             Err(e) => tlog!("[tsf] Activate step3a WARN: ITfKeystrokeMgr cast failed: {:?}", e),
         }
 
-        // Step 4: Initialize bridge (NON-FATAL — IME can activate even without engine)
-        match TsfBridge::initialize() {
+        // Step 4: Initialize engine bridge (worker + forwarder + config watcher).
+        // UI thread is NOT started here — creating an egui window from inside
+        // the TSF COM callback causes COM re-entrancy deadlock → Explorer crash.
+        match TsfBridge::initialize_engine() {
             Ok(bridge) => {
                 *self.bridge.borrow_mut() = Some(bridge);
-                tlog!("[tsf] Activate step4: Bridge OK");
+                tlog!("[tsf] Activate step4: Engine bridge OK (UI deferred)");
             }
-            Err(e) => tlog!("[tsf] Activate step4 WARN: Bridge init failed: {:?}", e),
+            Err(e) => tlog!("[tsf] Activate step4 WARN: Engine bridge init failed: {:?}", e),
         }
 
         self.is_active.store(true, Ordering::Release);
