@@ -58,7 +58,19 @@ impl ITfEditSession_Impl for CommitEditSession_Impl {
                 e
             })?;
 
-            ses_log(&format!("[tsf] DoEditSession: text inserted OK via ITfRange::SetText"));
+            // Move cursor to the end of inserted text
+            let _ = unsafe { range.Collapse(ec, TfAnchor(1)) }; // TF_ANCHOR_END
+
+            // Update the selection to place cursor at end
+            let new_sel = TF_SELECTION {
+                range: std::mem::ManuallyDrop::new(Some(range.clone())),
+                ..sel[0]
+            };
+            let _ = unsafe {
+                self.context.SetSelection(ec, &[new_sel])
+            };
+
+            ses_log(&format!("[tsf] DoEditSession: text inserted OK, cursor moved to end"));
         } else {
             ses_log("[tsf] DoEditSession: no range in selection");
         }

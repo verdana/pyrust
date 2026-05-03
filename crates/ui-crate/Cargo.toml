@@ -6,8 +6,13 @@ edition = "2021"
 [dependencies]
 engine-core = { path = "../engine-core" }
 yas-config = { path = "../yas-config" }
-eframe = "0.27"
-egui = "0.27"
 crossbeam-channel = "0.5"
-log = "0.4"
-winit = "0.29"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+]

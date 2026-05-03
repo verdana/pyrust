@@ -105,18 +105,33 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 **修复**：延迟 Bridge UI 线程初始化——仅在 Activate 中初始化 engine，不启动 egui 窗口。
 
-### 按键不响应问题（2026-05-03）
+### egui → Win32+GDI 迁移（2026-05-03）
 
-**现象**：IME 已注册且常驻，但切换后无法输入字符，候选框不出现。
+**原因**：egui/eframe/winit 在 TSF DLL 环境中无法正常工作：
+- OpenGL 上下文在 DLL 进程中创建失败或渲染黑色
+- winit EventLoop 在 DLL 重载后无法重建（`EventLoop can't be recreated`）
+- `WS_EX_NOACTIVATE` 与 OpenGL 透明窗口冲突
 
-**可能原因**：Windows 11 25H2 的 TextInputHost 不使用传统 `ITfKeyEventSink` 路径。
+**方案**：用原生 Win32 + GDI 替换 egui：
+- `CreateWindowExW` + `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST`
+- GDI `TextOutW` + `Rectangle` 渲染候选词
+- `ShowWindow(SW_HIDE/SW_SHOW)` 切换显示（永不销毁窗口）
+- 全局 `OnceLock` + `Mutex` 跨线程共享状态
 
-**已尝试的修复**：
-- 设置键盘 Compartment（`GUID_COMPARTMENT_KEYBOARD_OPENCLOSE` = 1）
-- 注册 `ITfThreadFocusSink`
-- 通过 `ITfEditSession` + `ITfRange::SetText` 提交文本
+**结果**：候选框正常显示，文字可上屏，不抢焦点。
 
-**排查方向**：在稳定版 Windows 测试；研究 fcitx5-windows/Mozc 的按键处理方式。
+### 候选框位置问题（2026-05-03）— 待修复
+
+**现象**：候选框随按键下移，且贴屏幕左侧。
+
+**可能原因**：`GetCaretPos` + `ClientToScreen` 在 TSF 环境中返回值不稳定。
+
+### 按键处理状态（2026-05-03）
+
+**已解决**：
+- `ITfContextKeyEventSink::OnKeyDown` 现在正确创建 edit session 插入文字
+- 空格键选第一候选词，数字键选对应候选词
+- 光标移到插入文字末尾
 
 ### windows-rs 升级 0.58 → 0.62（2026-05-03）
 

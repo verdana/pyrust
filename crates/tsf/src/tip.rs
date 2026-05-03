@@ -20,29 +20,13 @@ use windows::Win32::UI::TextServices::{
     GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
 };
 use std::cell::RefCell;
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use crate::bridge::TsfBridge;
+#[allow(unused_imports)]
+use crate::tlog;
 
 pub(crate) static DLL_REF_COUNT: AtomicI32 = AtomicI32::new(0);
-
-/// Write a diagnostic message to the log file on disk.
-/// In a TSF DLL there is no console; this is the only way to see what happens.
-fn tsf_log(msg: &str) {
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("C:\\Users\\Verdana\\pyrust_tsf.log")
-    {
-        let _ = writeln!(f, "{msg}");
-        let _ = f.flush();
-    }
-}
-
-macro_rules! tlog {
-    ($($arg:tt)*) => { tsf_log(&format!($($arg)*)) };
-}
 
 #[implement(IClassFactory)]
 pub struct PyrustClassFactory;
@@ -381,7 +365,28 @@ impl ITfContextKeyEventSink_Impl for PyrustTip_Impl {
             let _ = bridge.req_tx().send(crate::Request::KeyPress { vk, modifiers, response: resp_tx });
             let response = resp_rx.recv();
             match response {
-                crate::Response::Consumed | crate::Response::Committed(_) => Ok(true.into()),
+                crate::Response::Committed(text) => {
+                    tlog!("[tsf] CtxOnKeyDown: Committed '{}'", text);
+                    // Insert committed text via edit session using the stored context
+                    if let Some(context) = self.get_context() {
+                        use windows::Win32::UI::TextServices::TF_ES_READWRITE;
+                        let edit_session: ITfEditSession = crate::edit_session::CommitEditSession::new(
+                            context.clone(), text,
+                        ).into();
+                        let _ = unsafe {
+                            context.RequestEditSession(
+                                *self.client_id.borrow(),
+                                &edit_session,
+                                TF_ES_READWRITE,
+                            )
+                        };
+                        tlog!("[tsf] CtxOnKeyDown: RequestEditSession called");
+                    } else {
+                        tlog!("[tsf] CtxOnKeyDown: no context available, text LOST");
+                    }
+                    Ok(true.into())
+                }
+                crate::Response::Consumed => Ok(true.into()),
                 crate::Response::Passthrough => Ok(false.into()),
             }
         } else {

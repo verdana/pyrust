@@ -3,6 +3,26 @@
 //! This crate implements the Windows TSF interfaces needed to register
 //! pyrust as a system-level text input processor (TIP).
 
+use std::io::Write;
+
+/// Write a diagnostic message to the log file on disk.
+/// In a TSF DLL there is no console; this is the only way to see what happens.
+pub(crate) fn tsf_log(msg: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("C:\\Users\\Verdana\\pyrust_tsf.log")
+    {
+        let _ = writeln!(f, "{msg}");
+        let _ = f.flush();
+    }
+}
+
+macro_rules! tlog {
+    ($($arg:tt)*) => { $crate::tsf_log(&format!($($arg)*)) };
+}
+pub(crate) use tlog;
+
 pub mod bridge;
 pub mod composition;
 pub mod display_attrs;
@@ -51,13 +71,18 @@ pub mod oneshot {
 
     impl<T> Receiver<T> {
         pub fn recv(&self) -> T {
+            use std::time::{Duration, Instant};
+            let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 if let Some(value) =
                     self.slot.lock().expect("oneshot recv: lock poisoned").take()
                 {
                     return value;
                 }
-                std::hint::spin_loop();
+                if Instant::now() > deadline {
+                    panic!("oneshot recv: timed out after 5s — worker thread likely crashed");
+                }
+                std::thread::sleep(Duration::from_millis(1));
             }
         }
     }
