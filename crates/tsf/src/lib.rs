@@ -88,12 +88,17 @@ pub mod oneshot {
         /// the 5-second timeout elapsed (worker thread likely crashed).
         pub fn recv(&self) -> Option<T> {
             let mut lock = self.inner.slot.lock().expect("oneshot recv: lock poisoned");
-            let result = self
-                .inner
-                .condvar
-                .wait_timeout(lock, Duration::from_secs(5))
-                .expect("oneshot recv: lock poisoned");
-            lock = result.0;
+            while lock.is_none() {
+                let result = self
+                    .inner
+                    .condvar
+                    .wait_timeout(lock, Duration::from_secs(5))
+                    .expect("oneshot recv: lock poisoned");
+                lock = result.0;
+                if lock.is_none() {
+                    return None; // actual timeout
+                }
+            }
             lock.take()
         }
     }

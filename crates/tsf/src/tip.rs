@@ -106,10 +106,9 @@ impl PyrustTip {
         })
     }
 
-    /// Get current modifier key states from the OS.
     fn get_modifiers() -> crate::Modifiers {
-        // SAFETY: GetKeyState reads the current thread's key state table.
-        // GetKeyState returns i16; high bit (0x80) means key is pressed.
+        // SAFETY: GetKeyState reads the per-thread key state table; returns i16,
+        // high bit (0x80) means key is currently pressed.
         unsafe {
             crate::Modifiers {
                 shift: GetKeyState(VK_SHIFT.0 as i32) < 0,
@@ -119,56 +118,54 @@ impl PyrustTip {
         }
     }
 
-    /// Check if the engine would consume this key (for accurate OnTestKeyDown).
     fn should_consume_key(&self, vk: u32) -> bool {
         if !self.is_active.load(Ordering::Acquire) {
             return false;
         }
-        // Check zh_mode from bridge
         if let Some(ref bridge) = *self.bridge.borrow() {
             if !bridge.is_zh_mode() {
                 return false;
             }
         }
-        // Keys consumed in zh mode: letters, digits, space, backspace, enter, escape, arrows
         matches!(vk, 0x41..=0x5A | 0x30..=0x39 | 0x20 | 0x08 | 0x0D | 0x1B | 0x25..=0x28)
     }
 
-    /// Shared keystroke handling logic for both ITfKeyEventSink and ITfContextKeyEventSink.
     fn handle_keypress(&self, context: &ITfContext, vk: u32) -> WinResult<windows::core::BOOL> {
-        if let Some(ref bridge) = *self.bridge.borrow() {
-            let modifiers = Self::get_modifiers();
-            let caret_pos = self.get_caret_pos(context);
-            let (resp_tx, resp_rx) = crate::oneshot::channel();
-            let _ = bridge.req_tx().send(crate::Request::KeyPress {
-                vk,
-                modifiers,
-                caret_pos,
-                response: resp_tx,
-            });
-            match resp_rx.recv() {
-                Some(crate::Response::Committed(text)) => {
-                    tlog!("[tsf] handle_keypress: Committed '{}'", text);
-                    use windows::Win32::UI::TextServices::TF_ES_READWRITE;
-                    let edit_session: ITfEditSession =
-                        crate::edit_session::CommitEditSession::new(context.clone(), text).into();
-                    // SAFETY: context is a valid ITfContext. edit_session implements ITfEditSession.
-                    let _ = unsafe {
-                        context.RequestEditSession(
-                            *self.client_id.borrow(),
-                            &edit_session,
-                            TF_ES_READWRITE,
-                        )
-                    };
-                    tlog!("[tsf] handle_keypress: RequestEditSession called");
-                    Ok(true.into())
-                }
-                Some(crate::Response::Consumed) => Ok(true.into()),
-                Some(crate::Response::Passthrough) | None => Ok(false.into()),
+        let binding = self.bridge.borrow();
+        let bridge = match *binding {
+            Some(ref b) => b,
+            None => {
+                tlog!("[tsf] handle_keypress: no bridge, passing through");
+                return Ok(false.into());
             }
-        } else {
-            tlog!("[tsf] handle_keypress: no bridge, passing through");
-            Ok(false.into())
+        };
+        let modifiers = Self::get_modifiers();
+        let caret_pos = self.get_caret_pos(context);
+        let (resp_tx, resp_rx) = crate::oneshot::channel();
+        let _ = bridge.req_tx().send(crate::Request::KeyPress {
+            vk,
+            modifiers,
+            caret_pos,
+            response: resp_tx,
+        });
+        match resp_rx.recv() {
+            Some(crate::Response::Committed(text)) => {
+                tlog!("[tsf] handle_keypress: Committed '{}'", text);
+                use windows::Win32::UI::TextServices::TF_ES_READWRITE;
+                let edit_session: ITfEditSession =
+                    crate::edit_session::CommitEditSession::new(context.clone(), text).into();
+                // SAFETY: context is a valid ITfContext. edit_session implements ITfEditSession.
+                let _ = unsafe {
+                    context.RequestEditSession(
+                        *self.client_id.borrow(),
+                        &edit_session,
+                        TF_ES_READWRITE,
+                    )
+                };
+                Ok(true.into())
+            }
+            Some(crate::Response::Consumed) => Ok(true.into()),
+            Some(crate::Response::Passthrough) | None => Ok(false.into()),
         }
     }
 
@@ -392,6 +389,7 @@ impl ITfTextInputProcessor_Impl for PyrustTip_Impl {
         *self.focus_sink_cookie.borrow_mut() = None;
 
         *self.composition.borrow_mut() = None;
+        *self.context_key_cookies.borrow_mut() = Vec::new();
         if let Some(mut b) = self.bridge.borrow_mut().take() {
             b.shutdown();
         }

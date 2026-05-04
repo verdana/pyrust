@@ -95,7 +95,8 @@ impl TsfBridge {
         let worker_dict = Arc::clone(&dict);
         let worker_config = Arc::clone(&config);
         let worker_ui_tx = ui_tx.clone();
-        let zh_mode = Arc::new(AtomicBool::new(true));
+        let initial_zh = config.general.mode == yas_config::InputMode::Zh;
+        let zh_mode = Arc::new(AtomicBool::new(initial_zh));
         let worker_zh_mode = Arc::clone(&zh_mode);
         let worker_handle = thread::Builder::new()
             .name("worker".into())
