@@ -1,5 +1,4 @@
 pub mod candidate_window;
-pub mod renderer;
 pub mod theme;
 pub mod window;
 

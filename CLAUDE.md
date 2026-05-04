@@ -22,7 +22,7 @@
 - `pyrust/`: 二进制入口进程，负责线程调度。
 
 ## 代码仓库
-- 代码仓库在 `src/` 目录（`/home/verdana/workspace/pyrust/src/`）
+- 代码仓库在项目根目录（`/home/verdana/workspace/pyrust/`）
 - Windows 构建目录：`/mnt/c/Users/Verdana/Desktop/pyrust-test/src/`
 - 修改 TSF 代码后，需手动复制到 Windows 目录：`cp crates/tsf/src/*.rs /mnt/c/Users/Verdana/Desktop/pyrust-test/src/crates/tsf/src/`
 

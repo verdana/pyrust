@@ -1,7 +1,6 @@
-use windows::core::{implement, Error, HRESULT, Result as WinResult};
+use windows::core::{implement, Error, Result as WinResult, HRESULT};
 use windows::Win32::UI::TextServices::{
-    IEnumTfDisplayAttributeInfo, IEnumTfDisplayAttributeInfo_Impl,
-    ITfDisplayAttributeInfo,
+    IEnumTfDisplayAttributeInfo, IEnumTfDisplayAttributeInfo_Impl, ITfDisplayAttributeInfo,
 };
 
 /// Empty enumerator — returns no display attributes.

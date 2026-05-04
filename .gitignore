@@ -1,7 +1,8 @@
-/target/
 **/*.rs.bk
-*.pdb
-*.exe
-user.db
 *.dict
+*.exe
+*.pdb
 .omc/
+/crates/tsf/target
+/target/
+user.db

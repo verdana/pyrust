@@ -3,18 +3,32 @@
 //! This crate implements the Windows TSF interfaces needed to register
 //! pyrust as a system-level text input processor (TIP).
 
-use std::io::Write;
+use std::io::{BufWriter, Write};
+use std::sync::Mutex;
+
+/// Shared buffered log writer — keeps the file handle open across calls
+/// to avoid the cost of open/close on every keystroke.
+static LOG_WRITER: Mutex<Option<BufWriter<std::fs::File>>> = Mutex::new(None);
 
 /// Write a diagnostic message to the log file on disk.
 /// In a TSF DLL there is no console; this is the only way to see what happens.
 pub(crate) fn tsf_log(msg: &str) {
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("C:\\Users\\Verdana\\pyrust_tsf.log")
-    {
-        let _ = writeln!(f, "{msg}");
-        let _ = f.flush();
+    let mut guard = match LOG_WRITER.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if guard.is_none() {
+        if let Ok(f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("C:\\Users\\Verdana\\pyrust_tsf.log")
+        {
+            *guard = Some(BufWriter::new(f));
+        }
+    }
+    if let Some(ref mut writer) = *guard {
+        let _ = writeln!(writer, "{msg}");
+        let _ = writer.flush();
     }
 }
 
@@ -70,17 +84,22 @@ pub mod oneshot {
     }
 
     impl<T> Receiver<T> {
-        pub fn recv(&self) -> T {
+        /// Receive the value. Returns `None` if the sender was dropped or
+        /// the 5-second timeout elapsed (worker thread likely crashed).
+        pub fn recv(&self) -> Option<T> {
             use std::time::{Duration, Instant};
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                if let Some(value) =
-                    self.slot.lock().expect("oneshot recv: lock poisoned").take()
+                if let Some(value) = self
+                    .slot
+                    .lock()
+                    .expect("oneshot recv: lock poisoned")
+                    .take()
                 {
-                    return value;
+                    return Some(value);
                 }
                 if Instant::now() > deadline {
-                    panic!("oneshot recv: timed out after 5s — worker thread likely crashed");
+                    return None;
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }

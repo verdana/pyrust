@@ -1,11 +1,11 @@
 use std::io::Write;
-use windows::core::{GUID, HRESULT, Interface};
+use windows::core::{Interface, GUID, HRESULT};
 use windows::Win32::Foundation::{HMODULE, S_FALSE, S_OK};
 use windows::Win32::System::Com::IClassFactory;
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 
 use crate::registry::{register_tip, unregister_tip, CLSID_PYRUST_TIP};
-use crate::tip::{DLL_REF_COUNT, PyrustClassFactory};
+use crate::tip::{PyrustClassFactory, DLL_REF_COUNT};
 
 fn dll_log(msg: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -21,14 +21,12 @@ fn dll_log(msg: &str) {
 static mut DLL_HINSTANCE: HMODULE = HMODULE(std::ptr::null_mut());
 
 #[no_mangle]
-extern "system" fn DllMain(
-    hinst: HMODULE,
-    reason: u32,
-    _reserved: *mut std::ffi::c_void,
-) -> bool {
+extern "system" fn DllMain(hinst: HMODULE, reason: u32, _reserved: *mut std::ffi::c_void) -> bool {
     if reason == 1 {
         dll_log("[tsf] DllMain: DLL_PROCESS_ATTACH");
-        unsafe { DLL_HINSTANCE = hinst; }
+        unsafe {
+            DLL_HINSTANCE = hinst;
+        }
     } else if reason == 0 {
         dll_log("[tsf] DllMain: DLL_PROCESS_DETACH");
     }
@@ -73,7 +71,11 @@ extern "system" fn DllGetClassObject(
 extern "system" fn DllCanUnloadNow() -> HRESULT {
     let count = DLL_REF_COUNT.load(std::sync::atomic::Ordering::Acquire);
     dll_log(&format!("[tsf] DllCanUnloadNow refcount={count}"));
-    if count == 0 { S_OK } else { S_FALSE }
+    if count == 0 {
+        S_OK
+    } else {
+        S_FALSE
+    }
 }
 
 #[no_mangle]

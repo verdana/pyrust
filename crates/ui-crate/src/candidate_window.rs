@@ -1,7 +1,7 @@
 use crate::{UiCandidate, UiUpdate};
 use yas_config::UiConfig;
 
-/// Candidate window state — rendered by egui on the UI thread.
+/// Candidate window state — rendered by Win32 + GDI on the UI thread.
 pub struct CandidateWindow {
     pub visible: bool,
     pub candidates: Vec<UiCandidate>,

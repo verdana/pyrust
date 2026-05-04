@@ -20,9 +20,9 @@ use engine_core::{BigramModel, EngineCore, KeyEvent};
 use ui_crate::{UiAction, UiUpdate};
 use yas_config::Config;
 
-use crate::{PendingEdit, Request, Response};
 #[allow(unused_imports)]
 use crate::tlog;
+use crate::{PendingEdit, Request, Response};
 
 /// Global UI channel — initialized once, persists across DLL reloads.
 static GLOBAL_UI_TX: std::sync::Mutex<Option<Sender<UiUpdate>>> = std::sync::Mutex::new(None);
@@ -58,7 +58,10 @@ impl TsfBridge {
         } else {
             let mut base_dict = BaseDict::new();
             if let Err(e) = base_dict.load_from_file(dict_path) {
-                tlog!("[tsf] WARN: Failed to load base dictionary '{}': {e}", dict_path);
+                tlog!(
+                    "[tsf] WARN: Failed to load base dictionary '{}': {e}",
+                    dict_path
+                );
             }
             Arc::new(base_dict)
         };
@@ -69,16 +72,24 @@ impl TsfBridge {
         // Initialize global UI channel (once) — the UI thread never exits
         GLOBAL_UI_INIT.call_once(|| {
             let (ui_tx, action_rx) = ui_crate::window::init_global_ui(&config.ui);
-            *GLOBAL_UI_TX.lock().unwrap() = Some(ui_tx);
-            *GLOBAL_ACTION_RX.lock().unwrap() = Some(action_rx);
+            *GLOBAL_UI_TX
+                .lock()
+                .expect("GLOBAL_UI_TX poisoned during init") = Some(ui_tx);
+            *GLOBAL_ACTION_RX
+                .lock()
+                .expect("GLOBAL_ACTION_RX poisoned during init") = Some(action_rx);
             tlog!("[tsf] Global UI initialized (Win32 + GDI)");
         });
 
-        let ui_tx = GLOBAL_UI_TX.lock().unwrap().clone().unwrap();
+        let ui_tx = GLOBAL_UI_TX
+            .lock()
+            .expect("GLOBAL_UI_TX poisoned")
+            .clone()
+            .expect("GLOBAL_UI_TX not initialized — init_global_ui was never called");
 
         // Channels for this bridge instance
         let (req_tx, req_rx) = unbounded::<Request>();
-        let (edit_tx, _edit_rx) = unbounded::<PendingEdit>();
+        let (edit_tx, _edit_rx) = unbounded::<PendingEdit>(); // TODO: wire up edit channel
 
         // Spawn worker thread
         let worker_dict = Arc::clone(&dict);
@@ -119,12 +130,9 @@ impl TsfBridge {
                 let mut watcher: RecommendedWatcher = Watcher::new(
                     move |event: Result<notify::Event, notify::Error>| {
                         if let Ok(event) = event {
-                            let is_modify = matches!(
-                                event.kind,
-                                EventKind::Modify(_) | EventKind::Create(_)
-                            );
-                            if is_modify && last_reload.elapsed() >= Duration::from_millis(500)
-                            {
+                            let is_modify =
+                                matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_));
+                            if is_modify && last_reload.elapsed() >= Duration::from_millis(500) {
                                 last_reload = std::time::Instant::now();
                                 thread::sleep(Duration::from_millis(100));
                                 let _ = watcher_req_tx.send(Request::ConfigReload);
@@ -138,15 +146,19 @@ impl TsfBridge {
                     tlog!("[tsf] WARN: Failed to watch config: {e}");
                     return;
                 }
-                loop {
-                    thread::sleep(Duration::from_secs(u64::MAX));
-                }
+                // Park thread until process exit — no CPU usage.
+                // The config watcher callback keeps the watcher alive.
+                std::thread::park();
             })
             .context("failed to spawn config-watcher thread")?;
 
         // Action forwarder thread (reads from global action channel)
         let forwarder_req_tx = req_tx.clone();
-        let action_rx = GLOBAL_ACTION_RX.lock().unwrap().clone().unwrap();
+        let action_rx = GLOBAL_ACTION_RX
+            .lock()
+            .expect("GLOBAL_ACTION_RX poisoned")
+            .clone()
+            .expect("GLOBAL_ACTION_RX not initialized — init_global_ui was never called");
         let forwarder_handle = thread::Builder::new()
             .name("action-forwarder".into())
             .spawn(move || {
@@ -179,8 +191,9 @@ impl TsfBridge {
     }
 
     /// Queue an edit session request to be processed by TSF.
+    /// TODO: implement actual edit forwarding — currently a no-op.
     pub fn request_edit(&self, _context: &windows::Win32::UI::TextServices::ITfContext) {
-        let _ = self.edit_tx.send(PendingEdit::CommitText(String::new()));
+        // let _ = self.edit_tx.send(PendingEdit::CommitText(text));
     }
 
     /// Graceful shutdown: signal worker to flush and exit.
@@ -214,7 +227,9 @@ fn worker_loop(
                 })) {
                     Ok(a) => a,
                     Err(e) => {
-                        let msg = e.downcast_ref::<String>().map(|s| s.as_str())
+                        let msg = e
+                            .downcast_ref::<String>()
+                            .map(|s| s.as_str())
                             .or_else(|| e.downcast_ref::<&str>().copied())
                             .unwrap_or("unknown");
                         tlog!("[tsf] worker PANIC in handle_key: {msg}");

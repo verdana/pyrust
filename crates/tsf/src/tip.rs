@@ -1,26 +1,19 @@
-use windows::core::{implement, ComObjectInterface, Error, GUID, HRESULT, Interface, Result as WinResult};
-use windows::Win32::System::Variant::VARIANT;
-use windows::Win32::System::Com::{
-    CoFreeUnusedLibraries, IClassFactory, IClassFactory_Impl,
-};
-use windows::Win32::UI::TextServices::{
-    ITfCompositionSink, ITfCompositionSink_Impl,
-    ITfCompartmentMgr,
-    ITfContextKeyEventSink, ITfContextKeyEventSink_Impl,
-    ITfDisplayAttributeProvider, ITfDisplayAttributeProvider_Impl,
-    ITfEditSession,
-    ITfKeyEventSink, ITfKeyEventSink_Impl,
-    ITfKeystrokeMgr,
-    ITfSource,
-    ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
-    ITfTextInputProcessor, ITfTextInputProcessor_Impl,
-    ITfThreadFocusSink, ITfThreadFocusSink_Impl,
-    ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl,
-    ITfThreadMgr, ITfDocumentMgr, ITfContext, ITfComposition,
-    GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
-};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use windows::core::{
+    implement, ComObjectInterface, Error, Interface, Result as WinResult, GUID, HRESULT,
+};
+use windows::Win32::System::Com::{CoFreeUnusedLibraries, IClassFactory, IClassFactory_Impl};
+use windows::Win32::System::Variant::VARIANT;
+use windows::Win32::UI::TextServices::{
+    ITfCompartmentMgr, ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext,
+    ITfContextKeyEventSink, ITfContextKeyEventSink_Impl, ITfDisplayAttributeProvider,
+    ITfDisplayAttributeProvider_Impl, ITfDocumentMgr, ITfEditSession, ITfKeyEventSink,
+    ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfSource, ITfTextInputProcessor,
+    ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl, ITfTextInputProcessor_Impl,
+    ITfThreadFocusSink, ITfThreadFocusSink_Impl, ITfThreadMgr, ITfThreadMgrEventSink,
+    ITfThreadMgrEventSink_Impl, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
+};
 
 use crate::bridge::TsfBridge;
 #[allow(unused_imports)]
@@ -39,9 +32,13 @@ impl IClassFactory_Impl for PyrustClassFactory_Impl {
         ppv: *mut *mut std::ffi::c_void,
     ) -> WinResult<()> {
         if !punkouter.is_none() {
-            return Err(Error::new(HRESULT(0x80040110u32 as i32), "Aggregation not supported"));
+            return Err(Error::new(
+                HRESULT(0x80040110u32 as i32),
+                "Aggregation not supported",
+            ));
         }
         let tip: ITfTextInputProcessorEx = PyrustTip::new().into();
+        // SAFETY: COM QueryInterface — riid and ppv are valid per IClassFactory contract.
         unsafe { tip.query(riid, ppv) }.ok()?;
         Ok(())
     }
@@ -51,6 +48,7 @@ impl IClassFactory_Impl for PyrustClassFactory_Impl {
             DLL_REF_COUNT.fetch_add(1, Ordering::Release);
         } else {
             DLL_REF_COUNT.fetch_sub(1, Ordering::Release);
+            // SAFETY: CoFreeUnusedLibraries is a standard COM cleanup call.
             unsafe { CoFreeUnusedLibraries() };
         }
         Ok(())
@@ -101,6 +99,7 @@ impl PyrustTip {
     /// Get the current ITfContext from the active document manager.
     pub fn get_context(&self) -> Option<ITfContext> {
         self.current_doc_mgr.borrow().as_ref().and_then(|dm| {
+            // SAFETY: dm is a valid ITfDocumentMgr COM reference.
             unsafe { dm.GetTop() }.ok()
         })
     }
@@ -112,6 +111,7 @@ impl Drop for PyrustTip {
             b.shutdown();
         }
         DLL_REF_COUNT.fetch_sub(1, Ordering::Release);
+        // SAFETY: CoFreeUnusedLibraries is a standard COM cleanup call.
         unsafe { CoFreeUnusedLibraries() };
     }
 }
@@ -135,7 +135,10 @@ impl ITfTextInputProcessor_Impl for PyrustTip_Impl {
         match tm.cast::<ITfSource>() {
             Ok(source) => {
                 tlog!("[tsf] Activate step2a: ITfSource cast OK");
-                let sink_ref: windows::core::InterfaceRef<'_, ITfThreadMgrEventSink> = self.as_interface_ref();
+                let sink_ref: windows::core::InterfaceRef<'_, ITfThreadMgrEventSink> =
+                    self.as_interface_ref();
+                // SAFETY: sink_ref points to a valid COM interface (self implements ITfThreadMgrEventSink).
+                // The IID is the correct identifier for ITfThreadMgrEventSink.
                 match unsafe {
                     source.AdviseSink(&<ITfThreadMgrEventSink as Interface>::IID, &*sink_ref)
                 } {
@@ -153,15 +156,22 @@ impl ITfTextInputProcessor_Impl for PyrustTip_Impl {
         match tm.cast::<ITfKeystrokeMgr>() {
             Ok(keystroke_mgr) => {
                 tlog!("[tsf] Activate step3a: ITfKeystrokeMgr cast OK");
-                let key_sink_ref: windows::core::InterfaceRef<'_, ITfKeyEventSink> = self.as_interface_ref();
-                match unsafe {
-                    keystroke_mgr.AdviseKeyEventSink(tid, &*key_sink_ref, true)
-                } {
+                let key_sink_ref: windows::core::InterfaceRef<'_, ITfKeyEventSink> =
+                    self.as_interface_ref();
+                // SAFETY: key_sink_ref points to a valid COM interface (self implements ITfKeyEventSink).
+                // tid is the client ID provided by TSF in Activate.
+                match unsafe { keystroke_mgr.AdviseKeyEventSink(tid, &*key_sink_ref, true) } {
                     Ok(()) => tlog!("[tsf] Activate step3b: AdviseKeyEventSink OK"),
-                    Err(e) => tlog!("[tsf] Activate step3b WARN: AdviseKeyEventSink failed: {:?}", e),
+                    Err(e) => tlog!(
+                        "[tsf] Activate step3b WARN: AdviseKeyEventSink failed: {:?}",
+                        e
+                    ),
                 }
             }
-            Err(e) => tlog!("[tsf] Activate step3a WARN: ITfKeystrokeMgr cast failed: {:?}", e),
+            Err(e) => tlog!(
+                "[tsf] Activate step3a WARN: ITfKeystrokeMgr cast failed: {:?}",
+                e
+            ),
         }
 
         // Step 4: Initialize engine bridge (worker + forwarder + config watcher).
@@ -172,7 +182,10 @@ impl ITfTextInputProcessor_Impl for PyrustTip_Impl {
                 *self.bridge.borrow_mut() = Some(bridge);
                 tlog!("[tsf] Activate step4: Engine bridge OK (UI deferred)");
             }
-            Err(e) => tlog!("[tsf] Activate step4 WARN: Engine bridge init failed: {:?}", e),
+            Err(e) => tlog!(
+                "[tsf] Activate step4 WARN: Engine bridge init failed: {:?}",
+                e
+            ),
         }
 
         // Step 5: Set keyboard open state via compartment.
@@ -181,33 +194,47 @@ impl ITfTextInputProcessor_Impl for PyrustTip_Impl {
         match tm.cast::<ITfCompartmentMgr>() {
             Ok(comp_mgr) => {
                 tlog!("[tsf] Activate step5a: ITfCompartmentMgr cast OK");
+                // SAFETY: comp_mgr is a valid ITfCompartmentMgr obtained from ITfThreadMgr.
                 match unsafe { comp_mgr.GetCompartment(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE) } {
                     Ok(comp) => {
                         let val = VARIANT::from(1i32);
+                        // SAFETY: comp is a valid ITfCompartment. tid is the client ID. val is a valid VARIANT.
                         match unsafe { comp.SetValue(tid, &val) } {
-                            Ok(()) => tlog!("[tsf] Activate step5b: Keyboard compartment set to OPEN"),
+                            Ok(()) => {
+                                tlog!("[tsf] Activate step5b: Keyboard compartment set to OPEN")
+                            }
                             Err(e) => tlog!("[tsf] Activate step5b WARN: SetValue failed: {:?}", e),
                         }
                     }
                     Err(e) => tlog!("[tsf] Activate step5a WARN: GetCompartment failed: {:?}", e),
                 }
             }
-            Err(e) => tlog!("[tsf] Activate step5a WARN: ITfCompartmentMgr cast failed: {:?}", e),
+            Err(e) => tlog!(
+                "[tsf] Activate step5a WARN: ITfCompartmentMgr cast failed: {:?}",
+                e
+            ),
         }
 
         // Step 6: Register ITfThreadFocusSink (NON-FATAL).
         // This sink receives OnSetThreadFocus / OnKillThreadFocus notifications
         // which may be required for keystroke routing on Windows 11.
         if let Ok(source) = tm.cast::<ITfSource>() {
-            let focus_ref: windows::core::InterfaceRef<'_, ITfThreadFocusSink> = self.as_interface_ref();
-            match unsafe {
-                source.AdviseSink(&<ITfThreadFocusSink as Interface>::IID, &*focus_ref)
-            } {
+            let focus_ref: windows::core::InterfaceRef<'_, ITfThreadFocusSink> =
+                self.as_interface_ref();
+            // SAFETY: focus_ref points to a valid COM interface (self implements ITfThreadFocusSink).
+            match unsafe { source.AdviseSink(&<ITfThreadFocusSink as Interface>::IID, &*focus_ref) }
+            {
                 Ok(cookie) => {
                     *self.focus_sink_cookie.borrow_mut() = Some(cookie);
-                    tlog!("[tsf] Activate step6: ThreadFocusSink registered cookie={}", cookie);
+                    tlog!(
+                        "[tsf] Activate step6: ThreadFocusSink registered cookie={}",
+                        cookie
+                    );
                 }
-                Err(e) => tlog!("[tsf] Activate step6 WARN: ThreadFocusSink AdviseSink failed: {:?}", e),
+                Err(e) => tlog!(
+                    "[tsf] Activate step6 WARN: ThreadFocusSink AdviseSink failed: {:?}",
+                    e
+                ),
             }
         }
 
@@ -223,20 +250,29 @@ impl ITfTextInputProcessor_Impl for PyrustTip_Impl {
         if let Some(ref tm) = *self.thread_mgr.borrow() {
             if let Some(cookie) = *self.sink_cookie.borrow() {
                 if let Ok(source) = tm.cast::<ITfSource>() {
+                    // SAFETY: source is a valid ITfSource; cookie was saved from AdviseSink.
                     let _ = unsafe { source.UnadviseSink(cookie) };
-                    tlog!("[tsf] Deactivate: ThreadMgrEventSink unadvised cookie={}", cookie);
+                    tlog!(
+                        "[tsf] Deactivate: ThreadMgrEventSink unadvised cookie={}",
+                        cookie
+                    );
                 }
             }
             if let Ok(keystroke_mgr) = tm.cast::<ITfKeystrokeMgr>() {
                 let tid = *self.client_id.borrow();
+                // SAFETY: keystroke_mgr is a valid ITfKeystrokeMgr; tid matches the registered sink.
                 let _ = unsafe { keystroke_mgr.UnadviseKeyEventSink(tid) };
                 tlog!("[tsf] Deactivate: KeyEventSink unadvised tid={}", tid);
             }
             // Unadvise ThreadFocusSink
             if let Some(cookie) = *self.focus_sink_cookie.borrow() {
                 if let Ok(source) = tm.cast::<ITfSource>() {
+                    // SAFETY: source is a valid ITfSource; cookie was saved from AdviseSink.
                     let _ = unsafe { source.UnadviseSink(cookie) };
-                    tlog!("[tsf] Deactivate: ThreadFocusSink unadvised cookie={}", cookie);
+                    tlog!(
+                        "[tsf] Deactivate: ThreadFocusSink unadvised cookie={}",
+                        cookie
+                    );
                 }
             }
         }
@@ -255,7 +291,12 @@ impl ITfTextInputProcessor_Impl for PyrustTip_Impl {
 }
 
 impl ITfTextInputProcessorEx_Impl for PyrustTip_Impl {
-    fn ActivateEx(&self, ptim: windows::core::Ref<'_, ITfThreadMgr>, tid: u32, _dwflags: u32) -> WinResult<()> {
+    fn ActivateEx(
+        &self,
+        ptim: windows::core::Ref<'_, ITfThreadMgr>,
+        tid: u32,
+        _dwflags: u32,
+    ) -> WinResult<()> {
         tlog!("[tsf] ActivateEx flags=0x{:x}", _dwflags);
         self.Activate(ptim, tid)
     }
@@ -274,7 +315,10 @@ impl ITfKeyEventSink_Impl for PyrustTip_Impl {
         _lparam: windows::Win32::Foundation::LPARAM,
     ) -> WinResult<windows::core::BOOL> {
         let active = self.is_active.load(Ordering::Acquire);
-        tlog!("[tsf] OnTestKeyDown vk=0x{:x} active={active}", _wparam.0 as u32);
+        tlog!(
+            "[tsf] OnTestKeyDown vk=0x{:x} active={active}",
+            _wparam.0 as u32
+        );
         Ok(active.into())
     }
 
@@ -292,17 +336,21 @@ impl ITfKeyEventSink_Impl for PyrustTip_Impl {
         if let Some(ref bridge) = *self.bridge.borrow() {
             let modifiers = crate::Modifiers::default();
             let (resp_tx, resp_rx) = crate::oneshot::channel();
-            let _ = bridge.req_tx().send(crate::Request::KeyPress { vk, modifiers, response: resp_tx });
-            let response = resp_rx.recv();
-            match response {
-                crate::Response::Committed(text) => {
+            let _ = bridge.req_tx().send(crate::Request::KeyPress {
+                vk,
+                modifiers,
+                response: resp_tx,
+            });
+            match resp_rx.recv() {
+                Some(crate::Response::Committed(text)) => {
                     tlog!("[tsf] OnKeyDown: Committed '{}'", text);
-                    // Create edit session to insert text into the application
                     if let Some(context) = pic.as_ref() {
                         use windows::Win32::UI::TextServices::TF_ES_READWRITE;
-                        let edit_session: ITfEditSession = crate::edit_session::CommitEditSession::new(
-                            context.clone(), text,
-                        ).into();
+                        let edit_session: ITfEditSession =
+                            crate::edit_session::CommitEditSession::new(context.clone(), text)
+                                .into();
+                        // SAFETY: context is a valid ITfContext from TSF. edit_session implements
+                        // ITfEditSession. client_id is the tid from Activate.
                         let _ = unsafe {
                             context.RequestEditSession(
                                 *self.client_id.borrow(),
@@ -314,10 +362,8 @@ impl ITfKeyEventSink_Impl for PyrustTip_Impl {
                     }
                     Ok(true.into())
                 }
-                crate::Response::Consumed => {
-                    Ok(true.into())
-                }
-                crate::Response::Passthrough => Ok(false.into()),
+                Some(crate::Response::Consumed) => Ok(true.into()),
+                Some(crate::Response::Passthrough) | None => Ok(false.into()),
             }
         } else {
             tlog!("[tsf] OnKeyDown: no bridge, passing through");
@@ -326,16 +372,30 @@ impl ITfKeyEventSink_Impl for PyrustTip_Impl {
     }
 
     fn OnTestKeyUp(
-        &self, _pic: windows::core::Ref<'_, ITfContext>, _w: windows::Win32::Foundation::WPARAM, _l: windows::Win32::Foundation::LPARAM,
-    ) -> WinResult<windows::core::BOOL> { Ok(false.into()) }
+        &self,
+        _pic: windows::core::Ref<'_, ITfContext>,
+        _w: windows::Win32::Foundation::WPARAM,
+        _l: windows::Win32::Foundation::LPARAM,
+    ) -> WinResult<windows::core::BOOL> {
+        Ok(false.into())
+    }
 
     fn OnKeyUp(
-        &self, _pic: windows::core::Ref<'_, ITfContext>, _w: windows::Win32::Foundation::WPARAM, _l: windows::Win32::Foundation::LPARAM,
-    ) -> WinResult<windows::core::BOOL> { Ok(false.into()) }
+        &self,
+        _pic: windows::core::Ref<'_, ITfContext>,
+        _w: windows::Win32::Foundation::WPARAM,
+        _l: windows::Win32::Foundation::LPARAM,
+    ) -> WinResult<windows::core::BOOL> {
+        Ok(false.into())
+    }
 
     fn OnPreservedKey(
-        &self, _pic: windows::core::Ref<'_, ITfContext>, _pguid: *const GUID,
-    ) -> WinResult<windows::core::BOOL> { Ok(false.into()) }
+        &self,
+        _pic: windows::core::Ref<'_, ITfContext>,
+        _pguid: *const GUID,
+    ) -> WinResult<windows::core::BOOL> {
+        Ok(false.into())
+    }
 }
 
 impl ITfContextKeyEventSink_Impl for PyrustTip_Impl {
@@ -345,7 +405,10 @@ impl ITfContextKeyEventSink_Impl for PyrustTip_Impl {
         _lparam: windows::Win32::Foundation::LPARAM,
     ) -> WinResult<windows::core::BOOL> {
         let active = self.is_active.load(Ordering::Acquire);
-        tlog!("[tsf] CtxOnTestKeyDown vk=0x{:x} active={active}", wparam.0 as u32);
+        tlog!(
+            "[tsf] CtxOnTestKeyDown vk=0x{:x} active={active}",
+            wparam.0 as u32
+        );
         Ok(active.into())
     }
 
@@ -362,17 +425,21 @@ impl ITfContextKeyEventSink_Impl for PyrustTip_Impl {
         if let Some(ref bridge) = *self.bridge.borrow() {
             let modifiers = crate::Modifiers::default();
             let (resp_tx, resp_rx) = crate::oneshot::channel();
-            let _ = bridge.req_tx().send(crate::Request::KeyPress { vk, modifiers, response: resp_tx });
-            let response = resp_rx.recv();
-            match response {
-                crate::Response::Committed(text) => {
+            let _ = bridge.req_tx().send(crate::Request::KeyPress {
+                vk,
+                modifiers,
+                response: resp_tx,
+            });
+            match resp_rx.recv() {
+                Some(crate::Response::Committed(text)) => {
                     tlog!("[tsf] CtxOnKeyDown: Committed '{}'", text);
-                    // Insert committed text via edit session using the stored context
                     if let Some(context) = self.get_context() {
                         use windows::Win32::UI::TextServices::TF_ES_READWRITE;
-                        let edit_session: ITfEditSession = crate::edit_session::CommitEditSession::new(
-                            context.clone(), text,
-                        ).into();
+                        let edit_session: ITfEditSession =
+                            crate::edit_session::CommitEditSession::new(context.clone(), text)
+                                .into();
+                        // SAFETY: context is a valid ITfContext from get_context(). edit_session
+                        // implements ITfEditSession. client_id is the tid from Activate.
                         let _ = unsafe {
                             context.RequestEditSession(
                                 *self.client_id.borrow(),
@@ -386,8 +453,8 @@ impl ITfContextKeyEventSink_Impl for PyrustTip_Impl {
                     }
                     Ok(true.into())
                 }
-                crate::Response::Consumed => Ok(true.into()),
-                crate::Response::Passthrough => Ok(false.into()),
+                Some(crate::Response::Consumed) => Ok(true.into()),
+                Some(crate::Response::Passthrough) | None => Ok(false.into()),
             }
         } else {
             tlog!("[tsf] CtxOnKeyDown: no bridge, passing through");
@@ -396,16 +463,28 @@ impl ITfContextKeyEventSink_Impl for PyrustTip_Impl {
     }
 
     fn OnTestKeyUp(
-        &self, _wparam: windows::Win32::Foundation::WPARAM, _lparam: windows::Win32::Foundation::LPARAM,
-    ) -> WinResult<windows::core::BOOL> { Ok(false.into()) }
+        &self,
+        _wparam: windows::Win32::Foundation::WPARAM,
+        _lparam: windows::Win32::Foundation::LPARAM,
+    ) -> WinResult<windows::core::BOOL> {
+        Ok(false.into())
+    }
 
     fn OnKeyUp(
-        &self, _wparam: windows::Win32::Foundation::WPARAM, _lparam: windows::Win32::Foundation::LPARAM,
-    ) -> WinResult<windows::core::BOOL> { Ok(false.into()) }
+        &self,
+        _wparam: windows::Win32::Foundation::WPARAM,
+        _lparam: windows::Win32::Foundation::LPARAM,
+    ) -> WinResult<windows::core::BOOL> {
+        Ok(false.into())
+    }
 }
 
 impl ITfCompositionSink_Impl for PyrustTip_Impl {
-    fn OnCompositionTerminated(&self, _ec_write: u32, _pcomposition: windows::core::Ref<'_, ITfComposition>) -> WinResult<()> {
+    fn OnCompositionTerminated(
+        &self,
+        _ec_write: u32,
+        _pcomposition: windows::core::Ref<'_, ITfComposition>,
+    ) -> WinResult<()> {
         tlog!("[tsf] OnCompositionTerminated");
         *self.composition.borrow_mut() = None;
         Ok(())
@@ -413,11 +492,16 @@ impl ITfCompositionSink_Impl for PyrustTip_Impl {
 }
 
 impl ITfDisplayAttributeProvider_Impl for PyrustTip_Impl {
-    fn EnumDisplayAttributeInfo(&self) -> WinResult<windows::Win32::UI::TextServices::IEnumTfDisplayAttributeInfo> {
+    fn EnumDisplayAttributeInfo(
+        &self,
+    ) -> WinResult<windows::Win32::UI::TextServices::IEnumTfDisplayAttributeInfo> {
         tlog!("[tsf] EnumDisplayAttributeInfo -> returning empty enum");
         Ok(crate::display_attrs::EmptyEnumDisplayAttr {}.into())
     }
-    fn GetDisplayAttributeInfo(&self, _guid: *const GUID) -> WinResult<windows::Win32::UI::TextServices::ITfDisplayAttributeInfo> {
+    fn GetDisplayAttributeInfo(
+        &self,
+        _guid: *const GUID,
+    ) -> WinResult<windows::Win32::UI::TextServices::ITfDisplayAttributeInfo> {
         tlog!("[tsf] GetDisplayAttributeInfo -> E_NOTIMPL");
         Err(Error::new(HRESULT(0x80004001u32 as i32), "Not implemented"))
     }
@@ -434,8 +518,16 @@ impl ITfThreadMgrEventSink_Impl for PyrustTip_Impl {
         *self.current_doc_mgr.borrow_mut() = None;
         Ok(())
     }
-    fn OnSetFocus(&self, pdim_focus: windows::core::Ref<'_, ITfDocumentMgr>, pdim_prev: windows::core::Ref<'_, ITfDocumentMgr>) -> WinResult<()> {
-        tlog!("[tsf] OnSetFocus gain={} lost={}", pdim_focus.is_some(), pdim_prev.is_some());
+    fn OnSetFocus(
+        &self,
+        pdim_focus: windows::core::Ref<'_, ITfDocumentMgr>,
+        pdim_prev: windows::core::Ref<'_, ITfDocumentMgr>,
+    ) -> WinResult<()> {
+        tlog!(
+            "[tsf] OnSetFocus gain={} lost={}",
+            pdim_focus.is_some(),
+            pdim_prev.is_some()
+        );
         if pdim_prev.is_some() && pdim_focus.is_none() {
             if let Some(ref bridge) = *self.bridge.borrow() {
                 let _ = bridge.req_tx().send(crate::Request::Reset);
@@ -449,15 +541,23 @@ impl ITfThreadMgrEventSink_Impl for PyrustTip_Impl {
         // Install ITfContextKeyEventSink on the new context
         if let Some(ctx) = pic.as_ref() {
             if let Ok(source) = ctx.cast::<ITfSource>() {
-                let key_sink_ref: windows::core::InterfaceRef<'_, ITfContextKeyEventSink> = self.as_interface_ref();
+                let key_sink_ref: windows::core::InterfaceRef<'_, ITfContextKeyEventSink> =
+                    self.as_interface_ref();
+                // SAFETY: key_sink_ref points to a valid COM interface (self implements ITfContextKeyEventSink).
                 match unsafe {
                     source.AdviseSink(&<ITfContextKeyEventSink as Interface>::IID, &*key_sink_ref)
                 } {
                     Ok(cookie) => {
                         *self.context_key_cookie.borrow_mut() = Some(cookie);
-                        tlog!("[tsf] OnPushContext: ContextKeyEventSink installed cookie={}", cookie);
+                        tlog!(
+                            "[tsf] OnPushContext: ContextKeyEventSink installed cookie={}",
+                            cookie
+                        );
                     }
-                    Err(e) => tlog!("[tsf] OnPushContext: ContextKeyEventSink AdviseSink failed: {:?}", e),
+                    Err(e) => tlog!(
+                        "[tsf] OnPushContext: ContextKeyEventSink AdviseSink failed: {:?}",
+                        e
+                    ),
                 }
             }
         }
@@ -469,8 +569,12 @@ impl ITfThreadMgrEventSink_Impl for PyrustTip_Impl {
         if let Some(ctx) = pic.as_ref() {
             if let Some(cookie) = *self.context_key_cookie.borrow() {
                 if let Ok(source) = ctx.cast::<ITfSource>() {
+                    // SAFETY: source is a valid ITfSource; cookie was saved from AdviseSink in OnPushContext.
                     let _ = unsafe { source.UnadviseSink(cookie) };
-                    tlog!("[tsf] OnPopContext: ContextKeyEventSink unadvised cookie={}", cookie);
+                    tlog!(
+                        "[tsf] OnPopContext: ContextKeyEventSink unadvised cookie={}",
+                        cookie
+                    );
                 }
             }
         }

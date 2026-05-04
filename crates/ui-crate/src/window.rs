@@ -34,11 +34,12 @@ use windows::Win32::Graphics::Gdi::{
     TRANSPARENT, PS_SOLID, CreatePen, MoveToEx, LineTo, GetDC, ReleaseDC,
     FONT_CHARSET, FONT_OUTPUT_PRECISION, FONT_CLIP_PRECISION, FONT_QUALITY,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
+
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetCaretPos, GetMessageW, PostMessageW,
-    RegisterClassExW, SetWindowPos, ShowWindow, TranslateMessage, DispatchMessageW,
-    GetSystemMetrics, PostQuitMessage,
+    CreateWindowExW, DefWindowProcW, GetCaretPos, GetForegroundWindow,
+    GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GUITHREADINFO,
+    PostMessageW, PostQuitMessage, RegisterClassExW, SetWindowPos, ShowWindow,
+    TranslateMessage, DispatchMessageW,
     HWND_TOPMOST, MSG, SW_HIDE, SW_SHOW, SWP_NOACTIVATE,
     WM_DESTROY, WM_LBUTTONDOWN, WM_PAINT, WM_USER, WNDCLASSEXW,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
@@ -84,22 +85,27 @@ pub fn run_ui_window(config: UiConfig, receiver: Receiver<UiUpdate>, action_tx: 
     // Register window class
     let class_name: Vec<u16> = "pyrust_candidate\0".encode_utf16().collect();
     // White background brush for the window class (prevents black corners)
+    // SAFETY: CreateSolidBrush creates a GDI brush handle; valid until DeleteObject.
     let class_bg_brush = unsafe { CreateSolidBrush(COLORREF(0xFFFFFF)) };
     let wnd_class = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
         style: CS_HREDRAW | CS_VREDRAW,
         lpfnWndProc: Some(wnd_proc),
         hInstance: HINSTANCE::default(),
+        // SAFETY: LoadCursorW with system cursor IDC_ARROW is always valid.
         hCursor: unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() },
         hbrBackground: class_bg_brush,
         lpszClassName: PCWSTR(class_name.as_ptr()),
         ..Default::default()
     };
+    // SAFETY: wnd_class fields are valid for the duration of this call.
     unsafe { RegisterClassExW(&wnd_class) };
 
     // Create the window (hidden, no-activate, tool window, topmost)
     let ex_style = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
     let title: Vec<u16> = "pyrust\0".encode_utf16().collect();
+    // SAFETY: class_name and title are valid UTF-16 null-terminated buffers that
+    // outlive this call. Parent/hMenu/hInstance are None per WS_POPUP usage.
     let hwnd = unsafe {
         CreateWindowExW(
             ex_style,
@@ -128,6 +134,8 @@ pub fn run_ui_window(config: UiConfig, receiver: Receiver<UiUpdate>, action_tx: 
     // Create font
     let font_size = config.font_size.max(12) as i32;
     let font_name: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
+    // SAFETY: font_name is a valid null-terminated UTF-16 buffer. CreateFontW
+    // returns a GDI handle that is valid until DeleteObject is called.
     let font = unsafe {
         CreateFontW(
             -font_size, 0, 0, 0, 400, 0, 0, 0,
@@ -144,6 +152,7 @@ pub fn run_ui_window(config: UiConfig, receiver: Receiver<UiUpdate>, action_tx: 
     let pinyin_color = COLORREF(0x999999);
     let text_color = COLORREF(0x1A1A1A);
     let index_color = COLORREF(0xB0B0B0);
+    // SAFETY: CreateSolidBrush returns GDI brush handles; cleaned up in message loop exit.
     let bg_brush = unsafe { CreateSolidBrush(COLORREF(0xFFFFFF)) };
     let hover_brush = unsafe { CreateSolidBrush(COLORREF(0xE3EDFB)) };
 
@@ -161,7 +170,7 @@ pub fn run_ui_window(config: UiConfig, receiver: Receiver<UiUpdate>, action_tx: 
         last_caret_x: 0,
         last_caret_y: 0,
     };
-    *UI_STATE.lock().unwrap() = Some(state);
+    *UI_STATE.lock().expect("UI_STATE poisoned during init") = Some(state);
 
     // Spawn thread to receive UiUpdate and forward to WndProc
     let hwnd_raw = hwnd.0 as isize;
@@ -174,11 +183,12 @@ pub fn run_ui_window(config: UiConfig, receiver: Receiver<UiUpdate>, action_tx: 
             count += 1;
             ui_log(&format!("update #{count}: visible={vis} candidates={cands}"));
             {
-                let mut guard = UI_STATE.lock().unwrap();
+                let mut guard = UI_STATE.lock().expect("UI_STATE poisoned in update thread");
                 if let Some(ref mut state) = *guard {
                     state.window.apply_update(update);
                 }
             }
+            // SAFETY: hwnd is a valid window handle captured before thread spawn.
             let res = unsafe { PostMessageW(Some(hwnd), WM_CANDIDATE_UPDATE, WPARAM(0), LPARAM(0)) };
             if let Err(e) = res {
                 ui_log(&format!("PostMessageW failed: {e}"));
@@ -191,6 +201,8 @@ pub fn run_ui_window(config: UiConfig, receiver: Receiver<UiUpdate>, action_tx: 
     ui_log("entering message loop");
     let mut msg = MSG::default();
     loop {
+        // SAFETY: msg is a valid MSG struct. GetMessageW/TranslateMessage/
+        // DispatchMessageW are standard Win32 message loop calls.
         let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
         if ret.0 == 0 || ret.0 == -1 {
             break;
@@ -203,7 +215,9 @@ pub fn run_ui_window(config: UiConfig, receiver: Receiver<UiUpdate>, action_tx: 
 
     // Cleanup
     {
-        if let Some(state) = UI_STATE.lock().unwrap().take() {
+        if let Some(state) = UI_STATE.lock().expect("UI_STATE poisoned in cleanup").take() {
+            // SAFETY: These GDI handles were created in this function and are
+            // no longer referenced after UI_STATE is taken.
             unsafe {
                 let _ = DeleteObject(state.font.into());
                 let _ = DeleteObject(state.bg_brush.into());
@@ -216,6 +230,8 @@ pub fn run_ui_window(config: UiConfig, receiver: Receiver<UiUpdate>, action_tx: 
 
 // ── WndProc ─────────────────────────────────────────────────────────────
 
+// SAFETY: This is a Win32 window procedure callback invoked by the OS.
+// All parameters (hwnd, wparam, lparam) are provided by the system and valid.
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -224,7 +240,7 @@ unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_PAINT => {
-            let mut guard = UI_STATE.lock().unwrap();
+            let mut guard = UI_STATE.lock().expect("UI_STATE poisoned in WM_PAINT");
             if let Some(ref mut state) = *guard {
                 paint_window(hwnd, state);
             }
@@ -233,7 +249,7 @@ unsafe extern "system" fn wnd_proc(
         WM_LBUTTONDOWN => {
             let x = (lparam.0 as i32) & 0xFFFF;
             let y = ((lparam.0 as i32) >> 16) & 0xFFFF;
-            let guard = UI_STATE.lock().unwrap();
+            let guard = UI_STATE.lock().expect("UI_STATE poisoned in WM_LBUTTONDOWN");
             if let Some(ref state) = *guard {
                 if let Some(idx) = hit_test(x, y, state) {
                     let _ = state.action_tx.send(UiAction::SelectCandidate(idx));
@@ -243,7 +259,7 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_CANDIDATE_UPDATE => {
             ui_log("WM_CANDIDATE_UPDATE received");
-            let mut guard = UI_STATE.lock().unwrap();
+            let mut guard = UI_STATE.lock().expect("UI_STATE poisoned in WM_CANDIDATE_UPDATE");
             if let Some(ref mut state) = *guard {
                 let has = state.window.visible && !state.window.candidates.is_empty();
                 ui_log(&format!("WM_CANDIDATE_UPDATE: visible={} cands={}", state.window.visible, state.window.candidates.len()));
@@ -270,6 +286,7 @@ unsafe extern "system" fn wnd_proc(
 
 // ── Paint ───────────────────────────────────────────────────────────────
 
+// SAFETY: Caller guarantees hwnd is valid and state GDI handles are live.
 unsafe fn paint_window(hwnd: HWND, state: &mut UiState) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
@@ -343,6 +360,7 @@ unsafe fn paint_window(hwnd: HWND, state: &mut UiState) {
 
 // ── Layout & Position ───────────────────────────────────────────────────
 
+// SAFETY: Caller guarantees hwnd is valid and state GDI handles are live.
 unsafe fn layout_and_show(hwnd: HWND, state: &mut UiState) {
     let candidates = state.window.page_candidates();
     if candidates.is_empty() {
@@ -381,19 +399,39 @@ unsafe fn layout_and_show(hwnd: HWND, state: &mut UiState) {
 }
 
 fn caret_position(width: i32, height: i32, _last_x: i32, _last_y: i32) -> (i32, i32) {
+    // SAFETY: GetGUIThreadInfo queries the foreground thread's caret position,
+    // which is reliable across threads (unlike GetCaretPos which is thread-local).
+    // ClientToScreen converts client coords to screen coords using the fg window.
     unsafe {
         let mut pt = std::mem::zeroed::<windows::Win32::Foundation::POINT>();
-        let _ = GetCaretPos(&mut pt);
-        let fg = GetActiveWindow();
-        if !fg.is_invalid() {
-            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(fg, &mut pt);
+        let mut got_caret = false;
+
+        // Try GetGUIThreadInfo(0) — queries the foreground thread's caret
+        let mut gui = std::mem::zeroed::<GUITHREADINFO>();
+        gui.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+        if GetGUIThreadInfo(0, &mut gui).is_ok() && !gui.hwndCaret.is_invalid() {
+            pt.x = gui.rcCaret.left;
+            pt.y = gui.rcCaret.bottom;
+            let fg = GetForegroundWindow();
+            if !fg.is_invalid() {
+                let _ = windows::Win32::Graphics::Gdi::ClientToScreen(fg, &mut pt);
+                got_caret = true;
+            }
+        }
+
+        // Fallback: GetCaretPos (works if this thread owns the caret)
+        if !got_caret && GetCaretPos(&mut pt).is_ok() {
+            let fg = GetForegroundWindow();
+            if !fg.is_invalid() {
+                let _ = windows::Win32::Graphics::Gdi::ClientToScreen(fg, &mut pt);
+            }
         }
 
         let screen_w = GetSystemMetrics(SM_CXSCREEN);
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
 
         let mut x = pt.x;
-        let mut y = pt.y + 24; // below caret
+        let mut y = pt.y + 4; // just below the caret
 
         if x + width > screen_w { x = screen_w - width - 4; }
         if y + height > screen_h { y = pt.y - height - 4; }

@@ -1,20 +1,18 @@
 use std::io::Write;
 use windows::core::{GUID, HSTRING};
+use windows::Win32::Foundation::WIN32_ERROR;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+    COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::Registry::{
-    RegCreateKeyW, RegSetValueExW, RegCloseKey, HKEY, HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER, REG_SZ,
+    RegCloseKey, RegCreateKeyW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_SZ,
 };
-use windows::Win32::Foundation::WIN32_ERROR;
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 use windows::Win32::UI::TextServices::{
-    ITfCategoryMgr, ITfInputProcessorProfileMgr,
-    CLSID_TF_CategoryMgr,
+    CLSID_TF_CategoryMgr, ITfCategoryMgr, ITfInputProcessorProfileMgr, GUID_TFCAT_TIPCAP_COMLESS,
+    GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT, GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
     GUID_TFCAT_TIP_KEYBOARD,
-    GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
-    GUID_TFCAT_TIPCAP_COMLESS,
-    GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
 };
 
 fn reg_log(msg: &str) {
@@ -39,14 +37,26 @@ const IME_DISPLAY_NAME: &str = "Zero Pinyin";
 fn guid_to_string(g: &GUID) -> String {
     format!(
         "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
-        g.data1, g.data2, g.data3,
-        g.data4[0], g.data4[1], g.data4[2], g.data4[3],
-        g.data4[4], g.data4[5], g.data4[6], g.data4[7],
+        g.data1,
+        g.data2,
+        g.data3,
+        g.data4[0],
+        g.data4[1],
+        g.data4[2],
+        g.data4[3],
+        g.data4[4],
+        g.data4[5],
+        g.data4[6],
+        g.data4[7],
     )
 }
 
 fn check(err: WIN32_ERROR) -> Result<(), String> {
-    if err.is_ok() { Ok(()) } else { Err(format!("WIN32_ERROR: {:?}", err)) }
+    if err.is_ok() {
+        Ok(())
+    } else {
+        Err(format!("WIN32_ERROR: {:?}", err))
+    }
 }
 
 unsafe fn reg_create(hive: HKEY, path: &str, default_val: &str) -> Result<(), String> {
@@ -87,47 +97,50 @@ unsafe fn reg_set_value(hive: HKEY, key_path: &str, name: &str, value: &str) -> 
 fn register_categories_via_com() -> Result<(), String> {
     reg_log("[tsf] register_categories_via_com BEGIN");
     unsafe {
-        let cat_mgr: ITfCategoryMgr = CoCreateInstance(
-            &CLSID_TF_CategoryMgr,
-            None,
-            CLSCTX_INPROC_SERVER,
-        ).map_err(|e| {
-            reg_log(&format!("[tsf] CoCreateInstance(CategoryMgr) failed: {e}"));
-            format!("CoCreateInstance(CategoryMgr) failed: {e}")
-        })?;
+        let cat_mgr: ITfCategoryMgr =
+            CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER).map_err(|e| {
+                reg_log(&format!("[tsf] CoCreateInstance(CategoryMgr) failed: {e}"));
+                format!("CoCreateInstance(CategoryMgr) failed: {e}")
+            })?;
         reg_log("[tsf] ITfCategoryMgr created");
 
         // Keyboard category — essential for appearing as an IME
-        cat_mgr.RegisterCategory(
-            &CLSID_PYRUST_TIP,
-            &GUID_TFCAT_TIP_KEYBOARD,
-            &CLSID_PYRUST_TIP,
-        ).map_err(|e| {
-            reg_log(&format!("[tsf] RegisterCategory(KEYBOARD) failed: {e}"));
-            format!("RegisterCategory(KEYBOARD) failed: {e}")
-        })?;
+        cat_mgr
+            .RegisterCategory(
+                &CLSID_PYRUST_TIP,
+                &GUID_TFCAT_TIP_KEYBOARD,
+                &CLSID_PYRUST_TIP,
+            )
+            .map_err(|e| {
+                reg_log(&format!("[tsf] RegisterCategory(KEYBOARD) failed: {e}"));
+                format!("RegisterCategory(KEYBOARD) failed: {e}")
+            })?;
         reg_log("[tsf] RegisterCategory(KEYBOARD) OK");
 
         // Immersive support — required for UWP / modern apps on Win8+
-        cat_mgr.RegisterCategory(
-            &CLSID_PYRUST_TIP,
-            &GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
-            &CLSID_PYRUST_TIP,
-        ).map_err(|e| {
-            reg_log(&format!("[tsf] RegisterCategory(IMMERSIVE) failed: {e}"));
-            format!("RegisterCategory(IMMERSIVE) failed: {e}")
-        })?;
+        cat_mgr
+            .RegisterCategory(
+                &CLSID_PYRUST_TIP,
+                &GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+                &CLSID_PYRUST_TIP,
+            )
+            .map_err(|e| {
+                reg_log(&format!("[tsf] RegisterCategory(IMMERSIVE) failed: {e}"));
+                format!("RegisterCategory(IMMERSIVE) failed: {e}")
+            })?;
         reg_log("[tsf] RegisterCategory(IMMERSIVE) OK");
 
         // UIElement enabled — allows modern candidate window
-        cat_mgr.RegisterCategory(
-            &CLSID_PYRUST_TIP,
-            &GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
-            &CLSID_PYRUST_TIP,
-        ).map_err(|e| {
-            reg_log(&format!("[tsf] RegisterCategory(UIELEMENT) failed: {e}"));
-            format!("RegisterCategory(UIELEMENT) failed: {e}")
-        })?;
+        cat_mgr
+            .RegisterCategory(
+                &CLSID_PYRUST_TIP,
+                &GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+                &CLSID_PYRUST_TIP,
+            )
+            .map_err(|e| {
+                reg_log(&format!("[tsf] RegisterCategory(UIELEMENT) failed: {e}"));
+                format!("RegisterCategory(UIELEMENT) failed: {e}")
+            })?;
         reg_log("[tsf] RegisterCategory(UIELEMENT) OK");
 
         // COMLESS — modern TIP registration
@@ -155,19 +168,16 @@ fn register_profile_via_com() -> Result<(), String> {
         }
 
         let result = (|| -> Result<(), String> {
-            let ppm: ITfInputProcessorProfileMgr = CoCreateInstance(
-                &CLSID_TF_INPUTPROCESSORPROFILES,
-                None,
-                CLSCTX_INPROC_SERVER,
-            ).map_err(|e| {
-                reg_log(&format!("[tsf] CoCreateInstance(ProfileMgr) failed: {e}"));
-                format!("CoCreateInstance failed: {e}")
-            })?;
+            let ppm: ITfInputProcessorProfileMgr =
+                CoCreateInstance(&CLSID_TF_INPUTPROCESSORPROFILES, None, CLSCTX_INPROC_SERVER)
+                    .map_err(|e| {
+                        reg_log(&format!("[tsf] CoCreateInstance(ProfileMgr) failed: {e}"));
+                        format!("CoCreateInstance failed: {e}")
+                    })?;
             reg_log("[tsf] ITfInputProcessorProfileMgr created");
 
             let desc_h = HSTRING::from(IME_DISPLAY_NAME);
-            let desc_wide: &[u16] =
-                std::slice::from_raw_parts(desc_h.as_ptr(), desc_h.len());
+            let desc_wide: &[u16] = std::slice::from_raw_parts(desc_h.as_ptr(), desc_h.len());
             let icon_empty: &[u16] = &[];
 
             ppm.RegisterProfile(
@@ -181,7 +191,8 @@ fn register_profile_via_com() -> Result<(), String> {
                 0u32,
                 true,
                 0u32,
-            ).map_err(|e| {
+            )
+            .map_err(|e| {
                 reg_log(&format!("[tsf] RegisterProfile failed: {e}"));
                 format!("RegisterProfile failed: {e}")
             })?;
@@ -191,7 +202,10 @@ fn register_profile_via_com() -> Result<(), String> {
         })();
 
         CoUninitialize();
-        reg_log(&format!("[tsf] register_profile_via_com result={}", result.is_ok()));
+        reg_log(&format!(
+            "[tsf] register_profile_via_com result={}",
+            result.is_ok()
+        ));
         result
     }
 }
@@ -238,10 +252,16 @@ pub fn register_tip() -> Result<(), String> {
         reg_log("[tsf] Category Item UIELEMENTENABLED registered");
 
         // LanguageProfile — CRITICAL: tells Windows which language this TIP belongs to
-        let lang_profile_key = format!("{tip_key}\\LanguageProfile\\0x{LANG_CHINESE_SIMPLIFIED:08X}\\{profile_str}");
+        let lang_profile_key =
+            format!("{tip_key}\\LanguageProfile\\0x{LANG_CHINESE_SIMPLIFIED:08X}\\{profile_str}");
         reg_create(HKEY_LOCAL_MACHINE, &lang_profile_key, "Zero Pinyin")?;
         reg_set_value(HKEY_LOCAL_MACHINE, &lang_profile_key, "Profile", "")?;
-        reg_set_value(HKEY_LOCAL_MACHINE, &lang_profile_key, "Description", "Zero Pinyin IME")?;
+        reg_set_value(
+            HKEY_LOCAL_MACHINE,
+            &lang_profile_key,
+            "Description",
+            "Zero Pinyin IME",
+        )?;
         reg_set_value(HKEY_LOCAL_MACHINE, &lang_profile_key, "IconFile", "")?;
         reg_set_value(HKEY_LOCAL_MACHINE, &lang_profile_key, "IconIndex", "0")?;
         reg_log("[tsf] LanguageProfile registered");
@@ -249,7 +269,12 @@ pub fn register_tip() -> Result<(), String> {
         // Profile key at tip level
         let prof_key = format!("{tip_key}\\Profile\\{profile_str}");
         reg_create(HKEY_LOCAL_MACHINE, &prof_key, "Zero Pinyin")?;
-        reg_set_value(HKEY_LOCAL_MACHINE, &prof_key, "Description", "Zero Pinyin IME")?;
+        reg_set_value(
+            HKEY_LOCAL_MACHINE,
+            &prof_key,
+            "Description",
+            "Zero Pinyin IME",
+        )?;
         reg_set_value(HKEY_LOCAL_MACHINE, &prof_key, "IconFile", "")?;
         reg_set_value(HKEY_LOCAL_MACHINE, &prof_key, "IconIndex", "0")?;
         reg_log("[tsf] Profile registered");
@@ -257,7 +282,9 @@ pub fn register_tip() -> Result<(), String> {
         // ── Step 3: Per-user TSF registration (HKCU) ──
         let user_tip_key = format!("Software\\Microsoft\\CTF\\TIP\\{clsid_str}");
         let _ = reg_create(HKEY_CURRENT_USER, &user_tip_key, "Zero Pinyin IME");
-        let user_lang_key = format!("{user_tip_key}\\LanguageProfile\\0x{LANG_CHINESE_SIMPLIFIED:08X}\\{profile_str}");
+        let user_lang_key = format!(
+            "{user_tip_key}\\LanguageProfile\\0x{LANG_CHINESE_SIMPLIFIED:08X}\\{profile_str}"
+        );
         let _ = reg_create(HKEY_CURRENT_USER, &user_lang_key, "Zero Pinyin");
         reg_log("[tsf] HKCU registration done");
 
@@ -287,28 +314,30 @@ pub fn unregister_tip() -> Result<(), String> {
                         &CLSID_TF_INPUTPROCESSORPROFILES,
                         None,
                         CLSCTX_INPROC_SERVER,
-                    ).map_err(|e| format!("CoCreateInstance failed: {e}"))?;
+                    )
+                    .map_err(|e| format!("CoCreateInstance failed: {e}"))?;
                     ppm.UnregisterProfile(
                         &CLSID_PYRUST_TIP,
                         LANG_CHINESE_SIMPLIFIED,
                         &PROFILE_GUID,
                         0,
-                    ).map_err(|e| format!("UnregisterProfile failed: {e}"))?;
+                    )
+                    .map_err(|e| format!("UnregisterProfile failed: {e}"))?;
                     reg_log("[tsf] UnregisterProfile OK");
                     Ok(())
                 })();
 
                 let _ = (|| -> Result<(), String> {
-                    let cat_mgr: ITfCategoryMgr = CoCreateInstance(
-                        &CLSID_TF_CategoryMgr,
-                        None,
-                        CLSCTX_INPROC_SERVER,
-                    ).map_err(|e| format!("CoCreateInstance(CategoryMgr) failed: {e}"))?;
-                    cat_mgr.UnregisterCategory(
-                        &CLSID_PYRUST_TIP,
-                        &GUID_TFCAT_TIP_KEYBOARD,
-                        &CLSID_PYRUST_TIP,
-                    ).map_err(|e| format!("UnregisterCategory failed: {e}"))?;
+                    let cat_mgr: ITfCategoryMgr =
+                        CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)
+                            .map_err(|e| format!("CoCreateInstance(CategoryMgr) failed: {e}"))?;
+                    cat_mgr
+                        .UnregisterCategory(
+                            &CLSID_PYRUST_TIP,
+                            &GUID_TFCAT_TIP_KEYBOARD,
+                            &CLSID_PYRUST_TIP,
+                        )
+                        .map_err(|e| format!("UnregisterCategory failed: {e}"))?;
                     reg_log("[tsf] UnregisterCategory OK");
                     Ok(())
                 })();
@@ -320,7 +349,9 @@ pub fn unregister_tip() -> Result<(), String> {
     }
 
     reg_log("[tsf] unregister_tip END. Manual cleanup if needed.");
-    reg_log(&format!("  Delete HKLM\\SOFTWARE\\Microsoft\\CTF\\TIP\\{clsid_str}"));
+    reg_log(&format!(
+        "  Delete HKLM\\SOFTWARE\\Microsoft\\CTF\\TIP\\{clsid_str}"
+    ));
     reg_log(&format!("  Delete HKCR\\CLSID\\{clsid_str}"));
     Ok(())
 }
