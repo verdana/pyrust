@@ -120,11 +120,25 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 **结果**：候选框正常显示，文字可上屏，不抢焦点。
 
-### 候选框位置问题（2026-05-03）— 待修复
+### 候选框位置问题（2026-05-04）— 已修复
 
-**现象**：候选框随按键下移，且贴屏幕左侧。
+**现象**：候选框贴屏幕左上角，不跟随光标。
 
-**可能原因**：`GetCaretPos` + `ClientToScreen` 在 TSF 环境中返回值不稳定。
+**根因**：Win32 caret API（`GetGUIThreadInfo`/`GetCaretPos`）在 TSF 环境中不可靠——许多应用不使用 Win32 caret，导致坐标始终为 (0,0)。
+
+**修复**：
+- TSF 线程通过 `ITfContextView::GetTextExt`（TSF 标准 API）获取光标屏幕坐标
+- 新增 `CaretPosEditSession`（`edit_session.rs`）— 同步 edit session 调用 `GetTextExt`
+- `Request::KeyPress` 增加 `caret_pos` 字段，TSF → Worker → UI 传递坐标
+- `window.rs` 优先使用 TSF 提供的位置，无效时 fallback 到 Win32 caret API
+
+### 多音节候选词回退（2026-05-04）— 已修复
+
+**现象**：输入 `woyao` 时，输入到 `a` 后候选框消失（0 candidates）。
+
+**根因**：`update_candidates()` 将整个拼音串 `"wo yao"` 作为单个 key 查词库，但词库只存储单音节 key（`"wo"`, `"yao"`）。
+
+**修复**（`engine-core/src/lib.rs`）：多音节查询返回 0 candidates 时，回退到第一个音节单独查找。
 
 ### 按键处理状态（2026-05-03）
 

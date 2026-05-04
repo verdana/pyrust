@@ -392,16 +392,31 @@ unsafe fn layout_and_show(hwnd: HWND, state: &mut UiState) {
     let width = (total_width + 24).clamp(150, 900);
     let height = pinyin_h + state.font_size + 24;
 
-    let (x, y) = caret_position(width, height, state.last_caret_x, state.last_caret_y);
+    // Prefer TSF-provided position (from ITfContextView::GetTextExt) over
+    // Win32 caret APIs which are unreliable in TSF IME environments.
+    let (x, y) = if state.window.position.0 > 0 && state.window.position.1 > 0 {
+        let (cx, cy) = state.window.position;
+        let screen_w = GetSystemMetrics(SM_CXSCREEN);
+        let screen_h = GetSystemMetrics(SM_CYSCREEN);
+        let mut px = cx;
+        let mut py = cy + 4; // below the caret
+        if px + width > screen_w { px = screen_w - width - 4; }
+        if py + height > screen_h { py = cy - height - 4; }
+        if px < 0 { px = 0; }
+        if py < 0 { py = 0; }
+        (px, py)
+    } else {
+        caret_position(width, height, state.last_caret_x, state.last_caret_y)
+    };
     state.last_caret_x = x;
     state.last_caret_y = y;
     let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, width, height, SWP_NOACTIVATE);
 }
 
-fn caret_position(width: i32, height: i32, _last_x: i32, _last_y: i32) -> (i32, i32) {
-    // SAFETY: GetGUIThreadInfo queries the foreground thread's caret position,
-    // which is reliable across threads (unlike GetCaretPos which is thread-local).
-    // ClientToScreen converts client coords to screen coords using the fg window.
+fn caret_position(width: i32, height: i32, last_x: i32, last_y: i32) -> (i32, i32) {
+    // SAFETY: GetGUIThreadInfo queries the foreground thread's caret position.
+    // rcCaret is in client coordinates of hwndCaret (often a child control),
+    // so we must use hwndCaret for ClientToScreen — not GetForegroundWindow().
     unsafe {
         let mut pt = std::mem::zeroed::<windows::Win32::Foundation::POINT>();
         let mut got_caret = false;
@@ -412,11 +427,11 @@ fn caret_position(width: i32, height: i32, _last_x: i32, _last_y: i32) -> (i32, 
         if GetGUIThreadInfo(0, &mut gui).is_ok() && !gui.hwndCaret.is_invalid() {
             pt.x = gui.rcCaret.left;
             pt.y = gui.rcCaret.bottom;
-            let fg = GetForegroundWindow();
-            if !fg.is_invalid() {
-                let _ = windows::Win32::Graphics::Gdi::ClientToScreen(fg, &mut pt);
-                got_caret = true;
-            }
+            // Use hwndCaret (the window that owns the caret) for coordinate
+            // conversion — not GetForegroundWindow(), which may be a different
+            // top-level window and cause coordinate drift.
+            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(gui.hwndCaret, &mut pt);
+            got_caret = true;
         }
 
         // Fallback: GetCaretPos (works if this thread owns the caret)
@@ -424,17 +439,28 @@ fn caret_position(width: i32, height: i32, _last_x: i32, _last_y: i32) -> (i32, 
             let fg = GetForegroundWindow();
             if !fg.is_invalid() {
                 let _ = windows::Win32::Graphics::Gdi::ClientToScreen(fg, &mut pt);
+                got_caret = true;
             }
         }
 
         let screen_w = GetSystemMetrics(SM_CXSCREEN);
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
 
-        let mut x = pt.x;
-        let mut y = pt.y + 4; // just below the caret
+        // If we couldn't get a valid caret position, reuse the last known
+        // position instead of falling back to (0, 0) which pins to screen corner.
+        let (base_x, base_y) = if got_caret && pt.x > 0 && pt.y > 0 {
+            (pt.x, pt.y)
+        } else if last_x > 0 && last_y > 0 {
+            (last_x, last_y - 4) // undo the +4 from a previous call
+        } else {
+            (0, 0)
+        };
+
+        let mut x = base_x;
+        let mut y = base_y + 4; // just below the caret
 
         if x + width > screen_w { x = screen_w - width - 4; }
-        if y + height > screen_h { y = pt.y - height - 4; }
+        if y + height > screen_h { y = base_y - height - 4; }
         if x < 0 { x = 0; }
         if y < 0 { y = 0; }
 

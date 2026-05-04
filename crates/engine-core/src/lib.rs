@@ -277,6 +277,20 @@ impl EngineCore {
             all_entries.extend(entries.iter().cloned());
         }
 
+        // Fallback: for multi-syllable input, also try the first syllable alone.
+        // The dictionary stores single-syllable keys (e.g. "wo", "yao"), not
+        // multi-syllable phrases (e.g. "wo yao"). Without this fallback,
+        // typing "woyao" would show 0 candidates because "wo yao" doesn't exist.
+        if syllables.len() > 1 && all_entries.is_empty() {
+            let first_key = &syllables[0];
+            if let Some(entries) = self.dict.lookup(first_key) {
+                all_entries.extend(entries);
+            }
+            if let Some(entries) = self.user_dict.lookup(first_key) {
+                all_entries.extend(entries.iter().cloned());
+            }
+        }
+
         // Fuzzy variants (when enabled)
         if self.config.engine.fuzzy_pinyin {
             let variants = self.fuzzy.key_variants(&pinyin_key);

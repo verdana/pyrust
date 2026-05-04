@@ -118,6 +118,7 @@ pub enum Request {
     KeyPress {
         vk: u32,
         modifiers: Modifiers,
+        caret_pos: Option<(i32, i32)>,
         response: oneshot::Sender<Response>,
     },
     SelectCandidate {

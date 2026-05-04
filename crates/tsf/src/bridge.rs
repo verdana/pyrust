@@ -214,6 +214,7 @@ fn worker_loop(
             Request::KeyPress {
                 vk,
                 modifiers,
+                caret_pos,
                 response,
             } => {
                 tlog!("[tsf] worker: KeyPress vk=0x{vk:x}");
@@ -238,7 +239,7 @@ fn worker_loop(
                     }
                 };
                 tlog!("[tsf] worker: handle_key action={:?}", action);
-                let update = build_ui_update(engine);
+                let update = build_ui_update(engine, caret_pos);
                 let _ = ui_tx.send(update);
                 let resp = match action {
                     engine_core::Action::Passthrough => Response::Passthrough,
@@ -250,7 +251,7 @@ fn worker_loop(
             }
             Request::SelectCandidate { index, response } => {
                 let action = engine.select_candidate(index);
-                let _ = ui_tx.send(build_ui_update(engine));
+                let _ = ui_tx.send(build_ui_update(engine, None));
                 let resp = match action {
                     engine_core::Action::Commit(text) => Response::Committed(text),
                     _ => Response::Consumed,
@@ -263,7 +264,7 @@ fn worker_loop(
             }
             Request::ToggleMode => {
                 engine.toggle_mode();
-                let _ = ui_tx.send(build_ui_update(engine));
+                let _ = ui_tx.send(build_ui_update(engine, None));
             }
             Request::Shutdown => {
                 engine.flush_user_dict();
@@ -273,7 +274,7 @@ fn worker_loop(
     }
 }
 
-fn build_ui_update(engine: &EngineCore) -> UiUpdate {
+fn build_ui_update(engine: &EngineCore, caret_pos: Option<(i32, i32)>) -> UiUpdate {
     let candidates = engine.candidates();
     let ui_candidates: Vec<ui_crate::UiCandidate> = candidates
         .iter()
@@ -288,7 +289,7 @@ fn build_ui_update(engine: &EngineCore) -> UiUpdate {
         candidates: ui_candidates,
         pinyin: engine.pinyin_buffer().raw_input().to_string(),
         cursor_position: engine.pinyin_buffer().cursor_position(),
-        position: (0, 0),
+        position: caret_pos.unwrap_or((0, 0)),
         visible: !engine.pinyin_buffer().is_empty(),
     }
 }

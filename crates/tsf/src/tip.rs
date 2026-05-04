@@ -16,6 +16,7 @@ use windows::Win32::UI::TextServices::{
 };
 
 use crate::bridge::TsfBridge;
+use crate::edit_session::CaretPosEditSession;
 #[allow(unused_imports)]
 use crate::tlog;
 
@@ -102,6 +103,50 @@ impl PyrustTip {
             // SAFETY: dm is a valid ITfDocumentMgr COM reference.
             unsafe { dm.GetTop() }.ok()
         })
+    }
+
+    /// Get the caret screen position via a synchronous TSF edit session.
+    /// Returns (x, y) in screen coordinates, or None if unavailable.
+    fn get_caret_pos(&self, context: &ITfContext) -> Option<(i32, i32)> {
+        use std::sync::Mutex;
+        use windows::Win32::UI::TextServices::{TF_ES_READ, TF_ES_SYNC};
+
+        let result: *mut Mutex<Option<(i32, i32)>> =
+            Box::into_raw(Box::new(Mutex::new(None)));
+
+        // SAFETY: result points to a heap-allocated Mutex that outlives the
+        // synchronous edit session (TF_ES_SYNC ensures DoEditSession completes
+        // before RequestEditSession returns).
+        let session: ITfEditSession =
+            unsafe { CaretPosEditSession::new(context.clone(), result) }.into();
+
+        // TF_ES_READ | TF_ES_SYNC: read-only and synchronous — blocks until
+        // DoEditSession runs, so we can safely read the result afterward.
+        match unsafe {
+            context.RequestEditSession(
+                *self.client_id.borrow(),
+                &session,
+                TF_ES_READ | TF_ES_SYNC,
+            )
+        } {
+            Ok(_) => {}
+            Err(e) => {
+                tlog!("[tsf] get_caret_pos: RequestEditSession failed: {:?}", e);
+                // SAFETY: session won't run, free the result allocation.
+                let _ = unsafe { Box::from_raw(result) };
+                return None;
+            }
+        }
+
+        // SAFETY: The synchronous edit session has completed (TF_ES_SYNC),
+        // so we can safely read and free the result.
+        let pos = unsafe { Box::from_raw(result) }
+            .into_inner()
+            .ok()
+            .flatten();
+
+        tlog!("[tsf] get_caret_pos: result={:?}", pos);
+        pos
     }
 }
 
@@ -335,10 +380,13 @@ impl ITfKeyEventSink_Impl for PyrustTip_Impl {
         }
         if let Some(ref bridge) = *self.bridge.borrow() {
             let modifiers = crate::Modifiers::default();
+            // Get caret position from TSF before sending to worker
+            let caret_pos = pic.as_ref().and_then(|ctx| self.get_caret_pos(ctx));
             let (resp_tx, resp_rx) = crate::oneshot::channel();
             let _ = bridge.req_tx().send(crate::Request::KeyPress {
                 vk,
                 modifiers,
+                caret_pos,
                 response: resp_tx,
             });
             match resp_rx.recv() {
@@ -424,10 +472,13 @@ impl ITfContextKeyEventSink_Impl for PyrustTip_Impl {
         }
         if let Some(ref bridge) = *self.bridge.borrow() {
             let modifiers = crate::Modifiers::default();
+            // Get caret position from TSF before sending to worker
+            let caret_pos = self.get_context().and_then(|ctx| self.get_caret_pos(&ctx));
             let (resp_tx, resp_rx) = crate::oneshot::channel();
             let _ = bridge.req_tx().send(crate::Request::KeyPress {
                 vk,
                 modifiers,
+                caret_pos,
                 response: resp_tx,
             });
             match resp_rx.recv() {

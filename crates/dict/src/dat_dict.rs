@@ -1,9 +1,21 @@
 use std::fs::File;
+use std::io::Write;
 use std::path::Path;
 
 use memmap2::Mmap;
 
 use crate::DictEntry;
+
+fn dict_log(msg: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("C:\\Users\\Verdana\\pyrust_tsf.log")
+    {
+        let _ = writeln!(f, "[dict] {msg}");
+        let _ = f.flush();
+    }
+}
 
 /// Magic bytes for the binary dictionary format.
 const MAGIC: &[u8; 8] = b"INPUTDCT";
@@ -135,26 +147,47 @@ impl MmapDict {
         let check = self.check();
         let values = self.values();
 
+        dict_log(&format!(
+            "search('{}'): node_count={}, base[0]={}, check[0]={}",
+            key, self.node_count, base[0], check[0]
+        ));
+
         let mut state = 0usize;
         for &b in key.as_bytes() {
             let code = char_code(b);
             if code == 0 {
+                dict_log(&format!("search('{}'): char_code=0 for byte 0x{:02x}", key, b));
                 return None;
             }
             if state >= self.node_count {
+                dict_log(&format!("search('{}'): state {} >= node_count {}", key, state, self.node_count));
                 return None;
             }
             let next = (base[state].unsigned_abs() as usize) + (code as usize);
-            if next >= self.node_count || check[next] as usize != state {
+            if next >= self.node_count {
+                dict_log(&format!("search('{}'): next {} >= node_count {}", key, next, self.node_count));
+                return None;
+            }
+            if check[next] as usize != state {
+                dict_log(&format!(
+                    "search('{}'): check[{}]={} != state {}",
+                    key, next, check[next], state
+                ));
                 return None;
             }
             state = next;
         }
         if state < self.node_count && base[state] < 0 {
             let tid = values.get(state).copied().unwrap_or(-1);
+            dict_log(&format!("search('{}'): terminal state={}, tid={}", key, state, tid));
             if tid >= 0 {
                 return Some(tid as u32);
             }
+        } else {
+            dict_log(&format!(
+                "search('{}'): not terminal — state={}, base[state]={}",
+                key, state, base[state]
+            ));
         }
         None
     }
@@ -316,6 +349,35 @@ mod tests {
         assert_eq!(entries[1].text, "舒服");
         assert_eq!(entries[0].frequency, 50);
         assert_eq!(entries[1].weight, 5);
+    }
+
+    #[test]
+    fn test_mmap_lookup_real_dict() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/base.dict");
+        if !path.exists() {
+            eprintln!("Real dictionary not found at {:?}, skipping", path);
+            return;
+        }
+        let dict = MmapDict::open(&path).expect("failed to open real dictionary");
+        assert_eq!(dict.entry_count(), 99999);
+
+        // "a" should have 5 entries
+        let entries = dict.lookup("a").expect("'a' should return entries");
+        assert_eq!(entries.len(), 5, "expected 5 entries for 'a'");
+        assert_eq!(entries[0].text, "啊");
+
+        // "ni" should have 25 entries
+        let entries = dict.lookup("ni").expect("'ni' should return entries");
+        assert_eq!(entries.len(), 25, "expected 25 entries for 'ni'");
+        assert_eq!(entries[0].text, "你");
+
+        // "shi" should have 91 entries
+        let entries = dict.lookup("shi").expect("'shi' should return entries");
+        assert_eq!(entries.len(), 91, "expected 91 entries for 'shi'");
+        assert_eq!(entries[0].text, "是");
+
+        // "f" is not a valid syllable — should return None
+        assert!(dict.lookup("f").is_none(), "'f' should not be a terminal node");
     }
 
     #[test]
