@@ -3,6 +3,7 @@
 //! The UI thread is global — it starts once and never exits. This avoids the
 //! "winit EventLoop can't be recreated" error when the DLL is unloaded/reloaded.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Once;
 use std::thread;
@@ -22,7 +23,7 @@ use yas_config::Config;
 
 #[allow(unused_imports)]
 use crate::tlog;
-use crate::{PendingEdit, Request, Response};
+use crate::{Request, Response};
 
 /// Global UI channel — initialized once, persists across DLL reloads.
 static GLOBAL_UI_TX: std::sync::Mutex<Option<Sender<UiUpdate>>> = std::sync::Mutex::new(None);
@@ -32,7 +33,7 @@ static GLOBAL_UI_INIT: Once = Once::new();
 /// Holds all channels and thread handles for the TSF bridge.
 pub struct TsfBridge {
     req_tx: Sender<Request>,
-    edit_tx: Sender<PendingEdit>,
+    zh_mode: Arc<AtomicBool>,
     _worker: thread::JoinHandle<()>,
     _forwarder: thread::JoinHandle<()>,
     _config_watcher: thread::JoinHandle<()>,
@@ -89,13 +90,13 @@ impl TsfBridge {
 
         // Channels for this bridge instance
         let (req_tx, req_rx) = unbounded::<Request>();
-        let (edit_tx, _edit_rx) = unbounded::<PendingEdit>(); // TODO: wire up edit channel
 
         // Spawn worker thread
         let worker_dict = Arc::clone(&dict);
         let worker_config = Arc::clone(&config);
         let worker_ui_tx = ui_tx.clone();
-        let worker_edit_tx = edit_tx.clone();
+        let zh_mode = Arc::new(AtomicBool::new(true));
+        let worker_zh_mode = Arc::clone(&zh_mode);
         let worker_handle = thread::Builder::new()
             .name("worker".into())
             .spawn(move || {
@@ -104,7 +105,7 @@ impl TsfBridge {
                 }));
                 match engine {
                     Ok(mut engine) => {
-                        worker_loop(&mut engine, &req_rx, &worker_ui_tx, &worker_edit_tx);
+                        worker_loop(&mut engine, &req_rx, &worker_ui_tx, &worker_zh_mode);
                     }
                     Err(e) => {
                         let msg = if let Some(s) = e.downcast_ref::<String>() {
@@ -179,7 +180,7 @@ impl TsfBridge {
 
         Ok(Self {
             req_tx,
-            edit_tx,
+            zh_mode,
             _worker: worker_handle,
             _forwarder: forwarder_handle,
             _config_watcher: watcher_handle,
@@ -190,10 +191,8 @@ impl TsfBridge {
         &self.req_tx
     }
 
-    /// Queue an edit session request to be processed by TSF.
-    /// TODO: implement actual edit forwarding — currently a no-op.
-    pub fn request_edit(&self, _context: &windows::Win32::UI::TextServices::ITfContext) {
-        // let _ = self.edit_tx.send(PendingEdit::CommitText(text));
+    pub fn is_zh_mode(&self) -> bool {
+        self.zh_mode.load(Ordering::Relaxed)
     }
 
     /// Graceful shutdown: signal worker to flush and exit.
@@ -206,7 +205,7 @@ fn worker_loop(
     engine: &mut EngineCore,
     rx: &Receiver<Request>,
     ui_tx: &Sender<UiUpdate>,
-    _edit_tx: &Sender<PendingEdit>,
+    zh_mode: &AtomicBool,
 ) {
     tlog!("[tsf] worker_loop started, waiting for requests...");
     for req in rx {
@@ -261,9 +260,11 @@ fn worker_loop(
             Request::Reset => engine.reset(),
             Request::ConfigReload => {
                 engine.update_config(Arc::new(Config::load()));
+                zh_mode.store(engine.is_zh_mode(), Ordering::Relaxed);
             }
             Request::ToggleMode => {
                 engine.toggle_mode();
+                zh_mode.store(engine.is_zh_mode(), Ordering::Relaxed);
                 let _ = ui_tx.send(build_ui_update(engine, None));
             }
             Request::Shutdown => {

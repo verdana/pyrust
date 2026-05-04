@@ -47,24 +47,22 @@ pub mod registry;
 pub mod thread_mgr_events;
 pub mod tip;
 
-/// Pending edit operation queued from the worker thread.
-#[derive(Debug, Clone)]
-pub enum PendingEdit {
-    CommitText(String),
-    SetComposition { text: String, cursor: usize },
-    ClearComposition,
-}
-
 // Re-export main Request/Response types from the binary
 // These match pyrust/src/main.rs
 pub use engine_core::{Action, KeyEvent, Modifiers};
 
-/// The oneshot channel for synchronous Request→Response handoff.
+/// Synchronous oneshot channel using Condvar (no busy-wait).
 pub mod oneshot {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+
+    struct Inner<T> {
+        slot: Mutex<Option<T>>,
+        condvar: Condvar,
+    }
 
     pub struct Sender<T> {
-        slot: Arc<Mutex<Option<T>>>,
+        inner: Arc<Inner<T>>,
     }
 
     impl<T> std::fmt::Debug for Sender<T> {
@@ -75,40 +73,40 @@ pub mod oneshot {
 
     impl<T> Sender<T> {
         pub fn send(self, value: T) {
-            *self.slot.lock().expect("oneshot send: lock poisoned") = Some(value);
+            let mut lock = self.inner.slot.lock().expect("oneshot send: lock poisoned");
+            *lock = Some(value);
+            self.inner.condvar.notify_one();
         }
     }
 
     pub struct Receiver<T> {
-        slot: Arc<Mutex<Option<T>>>,
+        inner: Arc<Inner<T>>,
     }
 
     impl<T> Receiver<T> {
         /// Receive the value. Returns `None` if the sender was dropped or
         /// the 5-second timeout elapsed (worker thread likely crashed).
         pub fn recv(&self) -> Option<T> {
-            use std::time::{Duration, Instant};
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                if let Some(value) = self
-                    .slot
-                    .lock()
-                    .expect("oneshot recv: lock poisoned")
-                    .take()
-                {
-                    return Some(value);
-                }
-                if Instant::now() > deadline {
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(1));
-            }
+            let mut lock = self.inner.slot.lock().expect("oneshot recv: lock poisoned");
+            let result = self
+                .inner
+                .condvar
+                .wait_timeout(lock, Duration::from_secs(5))
+                .expect("oneshot recv: lock poisoned");
+            lock = result.0;
+            lock.take()
         }
     }
 
     pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-        let slot = Arc::new(Mutex::new(None));
-        (Sender { slot: slot.clone() }, Receiver { slot })
+        let inner = Arc::new(Inner {
+            slot: Mutex::new(None),
+            condvar: Condvar::new(),
+        });
+        (
+            Sender { inner: inner.clone() },
+            Receiver { inner },
+        )
     }
 }
 

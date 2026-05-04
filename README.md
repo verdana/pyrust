@@ -5,7 +5,7 @@
 ## 特性
 
 - **三线程架构**：系统回调、工作逻辑、UI 渲染完全分离，打字永不卡顿
-- **横版候选窗**：微信输入法风格，hover 高亮，点击选词，跟随光标定位
+- **横版候选窗**：现代输入法风格，hover 高亮，点击选词，跟随光标定位
 - **完全离线**：零网络依赖，所有词库本地存储，隐私零泄露
 - **10 万基础词库**：基于结巴分词词频数据，覆盖日常用词
 - **上文联想**：基于 Bigram 模型的上下文候选词加分
@@ -151,10 +151,9 @@ bigram_data_path = "bigram.dat"
 - [x] Windows TSF — 注册表修复（IME 可常驻 Windows 键盘列表）
 - [x] Windows TSF — Explorer 崩溃修复（延迟 UI 线程初始化）
 - [x] Windows TSF — 键盘 Compartment + 文本提交（ITfRange::SetText）
-- [x] Windows TSF — windows-rs 升级至 0.62
 - [x] Win32 + GDI 候选框（替换 egui，解决 DLL 环境 OpenGL 问题）
 - [x] 候选框跟随光标（TSF ITfContextView::GetTextExt）
-- [x] 贪心拼音切分 + 多字候选词回退（任意字母组合均有候选）
+- [x] 贪心拼音切分 + 多字候选词回退
 - [ ] Windows TSF — 按键路由验证（Windows 11 25H2 兼容性）
 - [ ] macOS Input Method Kit 接入
 - [ ] 集成测试

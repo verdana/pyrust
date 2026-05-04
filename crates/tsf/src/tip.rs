@@ -5,6 +5,7 @@ use windows::core::{
 };
 use windows::Win32::System::Com::{CoFreeUnusedLibraries, IClassFactory, IClassFactory_Impl};
 use windows::Win32::System::Variant::VARIANT;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
 use windows::Win32::UI::TextServices::{
     ITfCompartmentMgr, ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext,
     ITfContextKeyEventSink, ITfContextKeyEventSink_Impl, ITfDisplayAttributeProvider,
@@ -76,7 +77,7 @@ pub struct PyrustTip {
     current_doc_mgr: RefCell<Option<ITfDocumentMgr>>,
     composition: RefCell<Option<ITfComposition>>,
     sink_cookie: RefCell<Option<u32>>,
-    context_key_cookie: RefCell<Option<u32>>,
+    context_key_cookies: RefCell<Vec<u32>>,
     focus_sink_cookie: RefCell<Option<u32>>,
 }
 
@@ -92,7 +93,7 @@ impl PyrustTip {
             current_doc_mgr: RefCell::new(None),
             composition: RefCell::new(None),
             sink_cookie: RefCell::new(None),
-            context_key_cookie: RefCell::new(None),
+            context_key_cookies: RefCell::new(Vec::new()),
             focus_sink_cookie: RefCell::new(None),
         }
     }
@@ -103,6 +104,72 @@ impl PyrustTip {
             // SAFETY: dm is a valid ITfDocumentMgr COM reference.
             unsafe { dm.GetTop() }.ok()
         })
+    }
+
+    /// Get current modifier key states from the OS.
+    fn get_modifiers() -> crate::Modifiers {
+        // SAFETY: GetKeyState reads the current thread's key state table.
+        // GetKeyState returns i16; high bit (0x80) means key is pressed.
+        unsafe {
+            crate::Modifiers {
+                shift: GetKeyState(VK_SHIFT.0 as i32) < 0,
+                ctrl: GetKeyState(VK_CONTROL.0 as i32) < 0,
+                alt: GetKeyState(VK_MENU.0 as i32) < 0,
+            }
+        }
+    }
+
+    /// Check if the engine would consume this key (for accurate OnTestKeyDown).
+    fn should_consume_key(&self, vk: u32) -> bool {
+        if !self.is_active.load(Ordering::Acquire) {
+            return false;
+        }
+        // Check zh_mode from bridge
+        if let Some(ref bridge) = *self.bridge.borrow() {
+            if !bridge.is_zh_mode() {
+                return false;
+            }
+        }
+        // Keys consumed in zh mode: letters, digits, space, backspace, enter, escape, arrows
+        matches!(vk, 0x41..=0x5A | 0x30..=0x39 | 0x20 | 0x08 | 0x0D | 0x1B | 0x25..=0x28)
+    }
+
+    /// Shared keystroke handling logic for both ITfKeyEventSink and ITfContextKeyEventSink.
+    fn handle_keypress(&self, context: &ITfContext, vk: u32) -> WinResult<windows::core::BOOL> {
+        if let Some(ref bridge) = *self.bridge.borrow() {
+            let modifiers = Self::get_modifiers();
+            let caret_pos = self.get_caret_pos(context);
+            let (resp_tx, resp_rx) = crate::oneshot::channel();
+            let _ = bridge.req_tx().send(crate::Request::KeyPress {
+                vk,
+                modifiers,
+                caret_pos,
+                response: resp_tx,
+            });
+            match resp_rx.recv() {
+                Some(crate::Response::Committed(text)) => {
+                    tlog!("[tsf] handle_keypress: Committed '{}'", text);
+                    use windows::Win32::UI::TextServices::TF_ES_READWRITE;
+                    let edit_session: ITfEditSession =
+                        crate::edit_session::CommitEditSession::new(context.clone(), text).into();
+                    // SAFETY: context is a valid ITfContext. edit_session implements ITfEditSession.
+                    let _ = unsafe {
+                        context.RequestEditSession(
+                            *self.client_id.borrow(),
+                            &edit_session,
+                            TF_ES_READWRITE,
+                        )
+                    };
+                    tlog!("[tsf] handle_keypress: RequestEditSession called");
+                    Ok(true.into())
+                }
+                Some(crate::Response::Consumed) => Ok(true.into()),
+                Some(crate::Response::Passthrough) | None => Ok(false.into()),
+            }
+        } else {
+            tlog!("[tsf] handle_keypress: no bridge, passing through");
+            Ok(false.into())
+        }
     }
 
     /// Get the caret screen position via a synchronous TSF edit session.
@@ -356,15 +423,13 @@ impl ITfKeyEventSink_Impl for PyrustTip_Impl {
     fn OnTestKeyDown(
         &self,
         _pic: windows::core::Ref<'_, ITfContext>,
-        _wparam: windows::Win32::Foundation::WPARAM,
+        wparam: windows::Win32::Foundation::WPARAM,
         _lparam: windows::Win32::Foundation::LPARAM,
     ) -> WinResult<windows::core::BOOL> {
-        let active = self.is_active.load(Ordering::Acquire);
-        tlog!(
-            "[tsf] OnTestKeyDown vk=0x{:x} active={active}",
-            _wparam.0 as u32
-        );
-        Ok(active.into())
+        let vk = wparam.0 as u32;
+        let consume = self.should_consume_key(vk);
+        tlog!("[tsf] OnTestKeyDown vk=0x{:x} consume={consume}", vk);
+        Ok(consume.into())
     }
 
     fn OnKeyDown(
@@ -378,43 +443,9 @@ impl ITfKeyEventSink_Impl for PyrustTip_Impl {
         if !self.is_active.load(Ordering::Acquire) {
             return Ok(false.into());
         }
-        if let Some(ref bridge) = *self.bridge.borrow() {
-            let modifiers = crate::Modifiers::default();
-            // Get caret position from TSF before sending to worker
-            let caret_pos = pic.as_ref().and_then(|ctx| self.get_caret_pos(ctx));
-            let (resp_tx, resp_rx) = crate::oneshot::channel();
-            let _ = bridge.req_tx().send(crate::Request::KeyPress {
-                vk,
-                modifiers,
-                caret_pos,
-                response: resp_tx,
-            });
-            match resp_rx.recv() {
-                Some(crate::Response::Committed(text)) => {
-                    tlog!("[tsf] OnKeyDown: Committed '{}'", text);
-                    if let Some(context) = pic.as_ref() {
-                        use windows::Win32::UI::TextServices::TF_ES_READWRITE;
-                        let edit_session: ITfEditSession =
-                            crate::edit_session::CommitEditSession::new(context.clone(), text)
-                                .into();
-                        // SAFETY: context is a valid ITfContext from TSF. edit_session implements
-                        // ITfEditSession. client_id is the tid from Activate.
-                        let _ = unsafe {
-                            context.RequestEditSession(
-                                *self.client_id.borrow(),
-                                &edit_session,
-                                TF_ES_READWRITE,
-                            )
-                        };
-                        tlog!("[tsf] OnKeyDown: RequestEditSession called");
-                    }
-                    Ok(true.into())
-                }
-                Some(crate::Response::Consumed) => Ok(true.into()),
-                Some(crate::Response::Passthrough) | None => Ok(false.into()),
-            }
+        if let Some(ctx) = pic.as_ref() {
+            self.handle_keypress(ctx, vk)
         } else {
-            tlog!("[tsf] OnKeyDown: no bridge, passing through");
             Ok(false.into())
         }
     }
@@ -452,12 +483,10 @@ impl ITfContextKeyEventSink_Impl for PyrustTip_Impl {
         wparam: windows::Win32::Foundation::WPARAM,
         _lparam: windows::Win32::Foundation::LPARAM,
     ) -> WinResult<windows::core::BOOL> {
-        let active = self.is_active.load(Ordering::Acquire);
-        tlog!(
-            "[tsf] CtxOnTestKeyDown vk=0x{:x} active={active}",
-            wparam.0 as u32
-        );
-        Ok(active.into())
+        let vk = wparam.0 as u32;
+        let consume = self.should_consume_key(vk);
+        tlog!("[tsf] CtxOnTestKeyDown vk=0x{:x} consume={consume}", vk);
+        Ok(consume.into())
     }
 
     fn OnKeyDown(
@@ -470,45 +499,10 @@ impl ITfContextKeyEventSink_Impl for PyrustTip_Impl {
         if !self.is_active.load(Ordering::Acquire) {
             return Ok(false.into());
         }
-        if let Some(ref bridge) = *self.bridge.borrow() {
-            let modifiers = crate::Modifiers::default();
-            // Get caret position from TSF before sending to worker
-            let caret_pos = self.get_context().and_then(|ctx| self.get_caret_pos(&ctx));
-            let (resp_tx, resp_rx) = crate::oneshot::channel();
-            let _ = bridge.req_tx().send(crate::Request::KeyPress {
-                vk,
-                modifiers,
-                caret_pos,
-                response: resp_tx,
-            });
-            match resp_rx.recv() {
-                Some(crate::Response::Committed(text)) => {
-                    tlog!("[tsf] CtxOnKeyDown: Committed '{}'", text);
-                    if let Some(context) = self.get_context() {
-                        use windows::Win32::UI::TextServices::TF_ES_READWRITE;
-                        let edit_session: ITfEditSession =
-                            crate::edit_session::CommitEditSession::new(context.clone(), text)
-                                .into();
-                        // SAFETY: context is a valid ITfContext from get_context(). edit_session
-                        // implements ITfEditSession. client_id is the tid from Activate.
-                        let _ = unsafe {
-                            context.RequestEditSession(
-                                *self.client_id.borrow(),
-                                &edit_session,
-                                TF_ES_READWRITE,
-                            )
-                        };
-                        tlog!("[tsf] CtxOnKeyDown: RequestEditSession called");
-                    } else {
-                        tlog!("[tsf] CtxOnKeyDown: no context available, text LOST");
-                    }
-                    Ok(true.into())
-                }
-                Some(crate::Response::Consumed) => Ok(true.into()),
-                Some(crate::Response::Passthrough) | None => Ok(false.into()),
-            }
+        if let Some(ctx) = self.get_context() {
+            self.handle_keypress(&ctx, vk)
         } else {
-            tlog!("[tsf] CtxOnKeyDown: no bridge, passing through");
+            tlog!("[tsf] CtxOnKeyDown: no context available");
             Ok(false.into())
         }
     }
@@ -599,7 +593,7 @@ impl ITfThreadMgrEventSink_Impl for PyrustTip_Impl {
                     source.AdviseSink(&<ITfContextKeyEventSink as Interface>::IID, &*key_sink_ref)
                 } {
                     Ok(cookie) => {
-                        *self.context_key_cookie.borrow_mut() = Some(cookie);
+                        self.context_key_cookies.borrow_mut().push(cookie);
                         tlog!(
                             "[tsf] OnPushContext: ContextKeyEventSink installed cookie={}",
                             cookie
@@ -616,9 +610,9 @@ impl ITfThreadMgrEventSink_Impl for PyrustTip_Impl {
     }
     fn OnPopContext(&self, pic: windows::core::Ref<'_, ITfContext>) -> WinResult<()> {
         tlog!("[tsf] OnPopContext");
-        // Uninstall ITfContextKeyEventSink
+        // Uninstall ITfContextKeyEventSink — pop last cookie
         if let Some(ctx) = pic.as_ref() {
-            if let Some(cookie) = *self.context_key_cookie.borrow() {
+            if let Some(cookie) = self.context_key_cookies.borrow_mut().pop() {
                 if let Ok(source) = ctx.cast::<ITfSource>() {
                     // SAFETY: source is a valid ITfSource; cookie was saved from AdviseSink in OnPushContext.
                     let _ = unsafe { source.UnadviseSink(cookie) };
@@ -629,7 +623,6 @@ impl ITfThreadMgrEventSink_Impl for PyrustTip_Impl {
                 }
             }
         }
-        *self.context_key_cookie.borrow_mut() = None;
         Ok(())
     }
 }
