@@ -140,6 +140,25 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 **修复**（`engine-core/src/lib.rs`）：多音节查询返回 0 candidates 时，回退到第一个音节单独查找。
 
+### 贪心拼音切分 + 候选词回退（2026-05-04）— 已修复
+
+**现象**：输入任意字母组合（如 `jjjj`、`asdf`）时，候选框为空或只有单字。
+
+**根因**：
+1. `best_segmentation()` 要求完整切分，无法切分的输入（如 `jjjj`，`j` 不是合法音节）返回空
+2. 回退逻辑只尝试第一个音节，不支持多字组合
+
+**修复**（4 个文件）：
+- `dict/src/trie.rs`：`is_end()` 和 `root()` 改为 `pub`
+- `dict/src/pinyin_table.rs`：新增 `shortest_syllable_for_char()` — BFS 找某字母开头的最短音节（如 `'j'` → `"ju"`）
+- `engine-core/src/pinyin.rs`：新增 `greedy_segmentation()` — 贪心左切回退，无法切分时用最短音节代理
+- `engine-core/src/lib.rs`：`update_candidates()` 三级回退策略：
+  1. 完整 n-gram 查词（如 `"ju ju ju ju"`）
+  2. 单字组合（每个音节单独查词，拼成 N 字结果，如 `"据据据据"`）
+  3. 缩短 n-gram 窗口（如 `"ju ju"`）
+
+**结果**：任意字母组合都能产生候选词，字数与输入音节数匹配。
+
 ### 按键处理状态（2026-05-03）
 
 **已解决**：

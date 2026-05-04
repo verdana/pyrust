@@ -203,6 +203,29 @@ impl PinyinSyllabler {
         segments
     }
 
+    /// Greedy left-to-right segmentation for fallback when `best_segmentation` fails.
+    /// At each position, takes the longest valid syllable. If no syllable starts at
+    /// the current position, uses `shortest_syllable_for_char` as a proxy (e.g., 'j' → "ji").
+    pub fn greedy_segmentation(&self, input: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut pos = 0;
+        let bytes = input.as_bytes();
+
+        while pos < bytes.len() {
+            let matches = self.table.prefixes(input, pos);
+            if let Some(&(end, _)) = matches.last() {
+                result.push(input[pos..end].to_string());
+                pos = end;
+            } else if let Some(proxy) = self.table.shortest_syllable_for_char(bytes[pos] as char) {
+                result.push(proxy);
+                pos += 1;
+            } else {
+                pos += 1;
+            }
+        }
+        result
+    }
+
     /// Convert a list of syllable strings to a dictionary lookup key.
     pub fn syllables_to_key(&self, syllables: &[String]) -> String {
         syllables.join(" ")
@@ -350,5 +373,44 @@ mod tests {
         assert_eq!(buf.after_cursor(), "");
         buf.insert_at_cursor('i');
         assert_eq!(buf.raw_input(), "shi");
+    }
+
+    #[test]
+    fn test_greedy_segmentation_jjjj() {
+        let s = PinyinSyllabler::new();
+        // "j" alone is not a valid syllable; greedy maps each to shortest j-syllable
+        let result = s.greedy_segmentation("jjjj");
+        assert_eq!(result.len(), 4);
+        // Each proxy syllable should be a valid 2-char syllable starting with 'j'
+        for syl in &result {
+            assert!(syl.starts_with('j'));
+            assert!(syl.len() >= 2);
+        }
+    }
+
+    #[test]
+    fn test_greedy_segmentation_asdf() {
+        let s = PinyinSyllabler::new();
+        // "a" is valid, "s"→"si", "d"→"de"/"di", "f"→"fo"/"fu"
+        let result = s.greedy_segmentation("asdf");
+        assert!(!result.is_empty());
+        assert_eq!(result[0], "a"); // "a" is a complete syllable
+    }
+
+    #[test]
+    fn test_greedy_segmentation_valid_input() {
+        let s = PinyinSyllabler::new();
+        // valid input should produce same result as best_segmentation
+        let result = s.greedy_segmentation("nihao");
+        assert_eq!(result, vec!["ni", "hao"]);
+    }
+
+    #[test]
+    fn test_greedy_segmentation_mixed() {
+        let s = PinyinSyllabler::new();
+        // "wox" → "wo" is valid, "x" → proxy
+        let result = s.greedy_segmentation("wox");
+        assert_eq!(result[0], "wo");
+        assert!(result.len() >= 2);
     }
 }

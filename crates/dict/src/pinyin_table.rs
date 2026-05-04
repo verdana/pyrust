@@ -24,6 +24,26 @@ impl PinyinTable {
     pub fn prefixes(&self, input: &str, start: usize) -> Vec<(usize, &Vec<()>)> {
         self.trie.prefixes(input, start)
     }
+
+    /// Find the shortest complete syllable starting with the given character.
+    /// Used as a proxy when a standalone consonant (e.g., 'j') is not itself
+    /// a valid syllable but is the prefix of valid ones (e.g., "ji", "jia").
+    pub fn shortest_syllable_for_char(&self, ch: char) -> Option<String> {
+        let node = self.trie.root().children.get(&ch)?;
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back((node, String::from(ch)));
+        while let Some((node, s)) = queue.pop_front() {
+            if node.is_end() {
+                return Some(s);
+            }
+            for (c, child) in &node.children {
+                let mut next = s.clone();
+                next.push(*c);
+                queue.push_back((child, next));
+            }
+        }
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

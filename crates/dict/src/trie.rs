@@ -14,7 +14,7 @@ impl<V> TrieNode<V> {
         }
     }
 
-    fn is_end(&self) -> bool {
+    pub fn is_end(&self) -> bool {
         !self.values.is_empty()
     }
 }
@@ -84,6 +84,10 @@ impl<V> Trie<V> {
 
     pub fn is_empty(&self) -> bool {
         self.root.children.is_empty()
+    }
+
+    pub fn root(&self) -> &TrieNode<V> {
+        &self.root
     }
 }
 

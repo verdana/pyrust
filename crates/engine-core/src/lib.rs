@@ -263,7 +263,10 @@ impl EngineCore {
             return;
         }
 
-        let syllables = self.syllabler.best_segmentation(input);
+        let mut syllables = self.syllabler.best_segmentation(input);
+        if syllables.is_empty() {
+            syllables = self.syllabler.greedy_segmentation(input);
+        }
         let pinyin_key = self.syllabler.syllables_to_key(&syllables);
 
         // Collect entries from exact match and fuzzy variants
@@ -277,17 +280,50 @@ impl EngineCore {
             all_entries.extend(entries.iter().cloned());
         }
 
-        // Fallback: for multi-syllable input, also try the first syllable alone.
-        // The dictionary stores single-syllable keys (e.g. "wo", "yao"), not
-        // multi-syllable phrases (e.g. "wo yao"). Without this fallback,
-        // typing "woyao" would show 0 candidates because "wo yao" doesn't exist.
+        // Fallback: for multi-syllable input when no exact match found.
         if syllables.len() > 1 && all_entries.is_empty() {
-            let first_key = &syllables[0];
-            if let Some(entries) = self.dict.lookup(first_key) {
-                all_entries.extend(entries);
+            // Strategy 1: single-char composition — combine top candidate from each
+            // syllable to form an N-char result matching input length.
+            // e.g., "ju ju ju ju" → "据据据据" (4 chars for 4 syllables)
+            let mut chars: Vec<String> = Vec::with_capacity(syllables.len());
+            for syl in &syllables {
+                if let Some(entries) = self.dict.lookup(syl) {
+                    if let Some(first) = entries.first() {
+                        chars.push(first.text.clone());
+                        continue;
+                    }
+                }
+                chars.clear();
+                break;
             }
-            if let Some(entries) = self.user_dict.lookup(first_key) {
-                all_entries.extend(entries.iter().cloned());
+            if chars.len() == syllables.len() {
+                all_entries.push(dict::DictEntry {
+                    text: chars.join(""),
+                    pinyin: syllables.clone(),
+                    frequency: 100,
+                    weight: 0,
+                    is_user: false,
+                    updated_at: 0,
+                });
+            }
+
+            // Strategy 2: shorter n-gram windows (only if single-char failed).
+            // e.g., "ju ju ju" → try "ju ju" windows
+            if all_entries.is_empty() {
+                for n in (1..syllables.len()).rev() {
+                    for window in syllables.windows(n) {
+                        let key = self.syllabler.syllables_to_key(window);
+                        if let Some(entries) = self.dict.lookup(&key) {
+                            all_entries.extend(entries);
+                        }
+                        if let Some(entries) = self.user_dict.lookup(&key) {
+                            all_entries.extend(entries.iter().cloned());
+                        }
+                    }
+                    if !all_entries.is_empty() {
+                        break;
+                    }
+                }
             }
         }
 
