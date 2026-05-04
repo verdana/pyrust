@@ -5,7 +5,7 @@
 ## 特性
 
 - **三线程架构**：系统回调、工作逻辑、UI 渲染完全分离，打字永不卡顿
-- **横版候选窗**：微信输入法风格，dark/light 双主题，hover 高亮，点击选词
+- **横版候选窗**：微信输入法风格，hover 高亮，点击选词，跟随光标定位
 - **完全离线**：零网络依赖，所有词库本地存储，隐私零泄露
 - **10 万基础词库**：基于结巴分词词频数据，覆盖日常用词
 - **上文联想**：基于 Bigram 模型的上下文候选词加分
@@ -21,7 +21,7 @@
 | 核心引擎 | Rust |
 | 词库存储 | mmap Double-Array Trie (DAT) |
 | 个人词库 | SQLite |
-| UI 渲染 | egui + winit |
+| UI 渲染 | Win32 + GDI |
 | Windows IME | TSF (Text Services Framework) via windows-rs |
 | 配置 | TOML |
 
@@ -32,7 +32,7 @@ pyrust/
 ├── crates/
 │   ├── engine-core/      # 拼音引擎核心：状态机、切分、排序
 │   ├── dict/             # 词库引擎：mmap DAT 读取、用户词库
-│   ├── ui-crate/         # egui 候选词窗口渲染
+│   ├── ui-crate/         # Win32 + GDI 候选词窗口渲染
 │   ├── platform-adapter/ # 操作系统 IME 接入层
 │   ├── tsf/              # Windows TSF COM DLL (cdylib)
 │   └── yas-config/       # 全局配置管理
@@ -140,7 +140,7 @@ bigram_data_path = "bigram.dat"
 
 - [x] 拼音引擎核心（状态机、音节切分、候选排序）
 - [x] mmap 词库（DAT 编译与加载）
-- [x] egui 候选词窗口（横版、dark/light、hover、点击选词）
+- [x] Win32 + GDI 候选词窗口（横版、hover、点击选词、跟随光标）
 - [x] 个人词库（SQLite 持久化）
 - [x] 上文联想 (Bigram)
 - [x] 模糊音（8 组规则）
@@ -152,6 +152,9 @@ bigram_data_path = "bigram.dat"
 - [x] Windows TSF — Explorer 崩溃修复（延迟 UI 线程初始化）
 - [x] Windows TSF — 键盘 Compartment + 文本提交（ITfRange::SetText）
 - [x] Windows TSF — windows-rs 升级至 0.62
+- [x] Win32 + GDI 候选框（替换 egui，解决 DLL 环境 OpenGL 问题）
+- [x] 候选框跟随光标（TSF ITfContextView::GetTextExt）
+- [x] 贪心拼音切分 + 多字候选词回退（任意字母组合均有候选）
 - [ ] Windows TSF — 按键路由验证（Windows 11 25H2 兼容性）
 - [ ] macOS Input Method Kit 接入
 - [ ] 集成测试
