@@ -350,6 +350,18 @@ fn char_from_vk(vk: u32, modifiers: engine_core::Modifiers) -> Option<char> {
         } else {
             char::from_u32(vk + 0x20)?
         }),
+        // Punctuation keys — engine-core handles Chinese mapping;
+        // provide the ASCII character so KeyEvent.ch is populated.
+        0xBC => Some(if modifiers.shift { '<' } else { ',' }),
+        0xBE => Some(if modifiers.shift { '>' } else { '.' }),
+        0xBA => Some(';'),
+        0xBF => Some('?'),
+        0xBB => Some('='),
+        0xBD => Some('-'),
+        0xDC => Some('\\'),
+        0xDE => Some(if modifiers.shift { '"' } else { '\'' }),
+        0xDB => Some(if modifiers.shift { '{' } else { '[' }),
+        0xDD => Some(if modifiers.shift { '}' } else { ']' }),
         _ => None,
     }
 }

@@ -27,6 +27,8 @@ pub struct EngineCore {
     fuzzy: FuzzyPinyin,
     /// The last committed word, used for bigram context boost.
     last_committed: Option<String>,
+    /// Track quote pairing state (true = next quote is opening).
+    last_quote_was_open: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -74,12 +76,39 @@ impl EngineCore {
             bigram,
             fuzzy: FuzzyPinyin::new(),
             last_committed: None,
+            last_quote_was_open: false,
         }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         if !self.zh_mode {
             return Action::Passthrough;
+        }
+
+        // Punctuation: commit pending pinyin (if any) + punctuation character.
+        if let Some(punct) = self.handle_punctuation(key.vk, key.modifiers.shift) {
+            if self.pinyin_buffer.is_empty() {
+                self.state.transition_to(state_machine::State::Idle);
+                return Action::Commit(punct.to_string());
+            }
+            // Composing state: commit candidate text + punctuation together.
+            if let Some(candidate) = self.candidates.first() {
+                let text = format!("{}{}", candidate.text, punct);
+                let pinyin = candidate.pinyin.clone();
+                self.last_committed = Some(candidate.text.clone());
+                self.user_dict.learn(&candidate.text, pinyin, 1);
+                self.pinyin_buffer.clear();
+                self.candidates.clear();
+                self.state.transition_to(state_machine::State::Idle);
+                return Action::Commit(text);
+            }
+            // Pending (no candidates yet): commit raw pinyin + punctuation.
+            let raw = self.pinyin_buffer.raw_input().to_string();
+            let text = format!("{}{}", raw, punct);
+            self.pinyin_buffer.clear();
+            self.candidates.clear();
+            self.state.transition_to(state_machine::State::Idle);
+            return Action::Commit(text);
         }
 
         let state = self.state.current();
@@ -167,6 +196,39 @@ impl EngineCore {
                 Action::UpdateCandidates
             }
             _ => Action::Passthrough,
+        }
+    }
+
+    /// Returns the Chinese punctuation character for the given VK code, or None
+    /// if the key is not a punctuation key.
+    fn handle_punctuation(&mut self, vk: u32, shift: bool) -> Option<char> {
+        match vk {
+            0xBC if shift => Some('《'), // <
+            0xBC => Some('，'),           // ,
+            0xBE if shift => Some('》'), // >
+            0xBE => Some('。'),           // .
+            0xBA => Some('；'),           // ;
+            0xBF => Some('？'),           // ?
+            0x31 if shift => Some('！'), // Shift+1 = !
+            0xBB => Some('＝'),           // =
+            0xBD => Some('\u{2014}'),       // - → — (em dash)
+            0xDC => Some('、'),           // \
+            0xDE => {
+                // ' or " — paired quotes
+                let ch = if shift {
+                    let ch = if self.last_quote_was_open { '\u{201D}' } else { '\u{201C}' };
+                    self.last_quote_was_open = !self.last_quote_was_open;
+                    ch
+                } else {
+                    let ch = if self.last_quote_was_open { '\u{2019}' } else { '\u{2018}' };
+                    self.last_quote_was_open = !self.last_quote_was_open;
+                    ch
+                };
+                Some(ch)
+            }
+            0xDB => Some(if shift { '【' } else { '（' }), // [ or {
+            0xDD => Some(if shift { '】' } else { '）' }), // ] or }
+            _ => None,
         }
     }
 
