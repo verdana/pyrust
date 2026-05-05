@@ -7,19 +7,20 @@
 
 ## 技术栈
 - **语言**：Rust (Stable)
-- **平台接入**：`windows-rs` (TSF), `objc2` (InputMethodKit)
-- **UI 渲染**：`egui` (自绘候选窗)
+- **平台接入**：`windows-rs` 0.62 (TSF), `objc2` (InputMethodKit)
+- **UI 渲染**：Win32 + GDI（候选窗通过 `CreateWindowExW` + `TextOutW` 自绘）
 - **存储**：SQLite (个人词库持久化), mmap (基础词库只读映射)
-- **配置**：TOML
+- **配置**：TOML (`~/.config/pyrust/config.toml`)
 
 ## 项目结构 (代码地图)
-- `crates/engine-core/`: 拼音切分、DP 路径选择、状态机管理。
-- `crates/dict/`: 词库引擎（UserDict, BaseDict）。
-- `crates/platform-adapter/`: 操作系统 FFI 接入与 ImeBackend trait 定义。
-- `crates/ui-crate/`: egui 渲染逻辑。
-- `crates/yas-config/`: 全局配置加载。
-- `dict-compiler/`: 离线工具，将文本词表编译为二进制 Trie。
-- `pyrust/`: 二进制入口进程，负责线程调度。
+- `crates/engine-core/`: 拼音引擎核心 — 状态机、音节切分（DP + 贪心回退）、候选排序、中文标点映射、Bigram 联想
+- `crates/dict/`: 词库引擎 — mmap DAT 读取、用户词库 SQLite、拼音表
+- `crates/platform-adapter/`: 平台抽象层 — `ImeBackend` trait + dev/win/mac adapter
+- `crates/ui-crate/`: Win32 + GDI 候选窗渲染（横版、hover 高亮、点击选词、跟随光标）
+- `crates/yas-config/`: 全局 TOML 配置加载与热重载
+- `crates/tsf/`: Windows TSF COM DLL — 独立 Cargo workspace（windows 0.62 依赖冲突），包含所有 COM 接口实现
+- `dict-compiler/`: 离线工具，将文本词表编译为二进制 mmap DAT
+- `pyrust/`: 二进制入口进程，三线程调度（系统回调、引擎工作、UI 渲染）
 
 ## 代码仓库
 - 代码仓库在项目根目录（`/home/verdana/workspace/pyrust/`）
@@ -103,28 +104,19 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 详细记录见 `docs/tsf-troubleshooting.md`。
 
-### Explorer 崩溃问题（2026-05-03）— 已修复
+### Explorer 崩溃 + egui → Win32+GDI 迁移（2026-05-03）— 已修复
 
-**现象**：切换到 pyrust 输入法时，任务栏消失后重新出现（Explorer 重启）。
+**现象**：切换到 pyrust 输入法时，Explorer 崩溃（任务栏消失后重现）。
 
-**根因**：Bridge 线程初始化（egui/winit）在 TSF COM 回调线程中创建窗口，导致 COM 重入死锁。
+**根因**：`egui`/`eframe`/`winit` 在 TSF DLL 环境中无法正常工作：OpenGL 上下文创建失败、`EventLoop` 无法在 DLL 重载后重建、`WS_EX_NOACTIVATE` 与透明窗口冲突。
 
-**修复**：延迟 Bridge UI 线程初始化——仅在 Activate 中初始化 engine，不启动 egui 窗口。
-
-### egui → Win32+GDI 迁移（2026-05-03）
-
-**原因**：egui/eframe/winit 在 TSF DLL 环境中无法正常工作：
-- OpenGL 上下文在 DLL 进程中创建失败或渲染黑色
-- winit EventLoop 在 DLL 重载后无法重建（`EventLoop can't be recreated`）
-- `WS_EX_NOACTIVATE` 与 OpenGL 透明窗口冲突
-
-**方案**：用原生 Win32 + GDI 替换 egui：
+**修复**：用原生 Win32 + GDI 替换 egui，UI 线程延后到首次需要时初始化。方案如下：
 - `CreateWindowExW` + `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST`
 - GDI `TextOutW` + `Rectangle` 渲染候选词
 - `ShowWindow(SW_HIDE/SW_SHOW)` 切换显示（永不销毁窗口）
-- 全局 `OnceLock` + `Mutex` 跨线程共享状态
+- 全局 `OnceLock` + `Mutex` 跨线程共享窗口状态
 
-**结果**：候选框正常显示，文字可上屏，不抢焦点。
+**结果**：候选框正常显示，文字可上屏，不抢焦点，Explorer 不再崩溃。
 
 ### 候选框位置问题（2026-05-04）— 已修复
 
@@ -223,47 +215,35 @@ cargo build --release --target x86_64-pc-windows-gnu
 - `tsf/src/tip.rs`：`should_consume_key` 新增标点 VK 码消费
 - `tsf/src/bridge.rs`：`char_from_vk` 新增标点 VK→ASCII 字符转换
 
-### TSF Composition String（拼音上屏 + 下划线）（2026-05-05）
+### TSF Composition String — 内联拼音显示（2026-05-05）— 已修复
 
 **功能**：拼音直接写入应用文档（带下划线），候选词选中后替换为最终文字。现代输入法标准行为。
 
-**输入流程**：
-```
-用户键入 n → 应用显示 "n"（实线下划线，composition 状态）
-用户键入 i → 应用显示 "ni"（实线下划线）
-用户按空格 → "ni" 替换为 "你"（点状下划线，已选候选词）
-最终确认 → "你"（无下划线，普通文字）
-Esc 取消 → 拼音文字从应用文档中清除
-```
+**当前方案**：手动 ITfRange 跟踪（`predit_range`）
+
+由于 `StartComposition` 在所有条件下都返回 `E_INVALIDARG`（根因不明，可能与 Notepad 的 TSF 文本存储实现有关），当前通过手动存储并管理 `ITfRange` 来实现内联显示：
+
+- **首次按键**：`GetSelection` → 获取光标 range → `SetText` 插入拼音 → 存储该 range 到 `predit_range`
+- **后续按键**：用存储的 range → `SetText` **替换**上次文本（避免叠加）
+- **提交/清除**：`SetText` 最终文本 → 清除 `predit_range`
+- **共享机制**：`predit_range: Rc<RefCell<Option<ITfRange>>>` 在 `PyrustTip` 和 `CompositionEditSession` 之间共享
 
 **架构**：
-- `engine-core/src/lib.rs`：`Action::UpdatePreedit` 携带拼音文本，`Action::ClearPreedit` 表示拼音清空，`Action::CommitAndPreedit` 表示提交+新输入
+- `engine-core/src/lib.rs`：`Action::UpdatePreedit`（拼音更新）、`Action::ClearPreedit`（拼音清空）、`Action::CommitAndPreedit`（提交+新拼音）
 - `tsf/src/lib.rs`：`Response::ConsumedWithText(String)` 和 `Response::CommittedWithPreedit(String, String)`
-- `tsf/src/bridge.rs`：`Action::UpdatePreedit` → `ConsumedWithText`，`CommitAndPreedit` → `CommittedWithPreedit`
-- `tsf/src/edit_session.rs`：`CompositionEditSession` — 管理 `StartComposition` / `SetText` / `EndComposition` 生命周期
-- `tsf/src/display_attrs.rs`：`InputDisplayAttr`（`TF_LS_SOLID`）和 `ConvertedDisplayAttr`（`TF_LS_DOT`），`PyrustEnumDisplayAttr` 枚举器
+- `tsf/src/edit_session.rs`：`CompositionEditSession` — 管理 `predit_range` 的创建/更新/提交/清除
 - `tsf/src/tip.rs`：`handle_keypress` 匹配 `ConsumedWithText` → 更新 composition，`Committed` → 结束 composition
+- `tsf/src/bridge.rs`：`Action::UpdatePreedit` → `ConsumedWithText`，`CommitAndPreedit` → `CommittedWithPreedit`
 
-**关键 API**：
-- `ITfContextComposition::StartComposition(ec, range, None)` → 返回 `ITfComposition`
-- `comp.GetRange()` → 获取 composition 范围
-- `range.SetText(ec, 0, &text)` → 替换 composition 文字
-- `comp.EndComposition(ec)` → 结束 composition（文字留在文档中）
+**已知限制**：
+- 下划线不显示：TSF display attribute 渲染依赖 `StartComposition` 创建的 active composition，但 `StartComposition` 始终返回 `E_INVALIDARG`；代码保留（`display_attrs.rs`、`registry.rs`），后续只需解决即可启用
 
-**生命周期管理**：
-- `self.composition` 在 `StartComposition` 成功后赋值 `Some(comp)`
-- `OnCompositionTerminated` 回调中置为 `None`
-- `Deactivate` 中清理
-- `handle_keypress` 结束时检查引擎 `pinyin_buffer_empty()`，清理残留 composition
+**关键教训**：
+- `ITfRange::SetText` 后 range 被折叠到文本末尾（0 字符），需要 `ShiftStart(-N)` 展开
+- `GUID_PROP_COMPOSING` 是 TSF 只读属性，TIP 调用 `SetValue` 返回 `E_INVALIDARG`
+- `ITfCategoryMgr::RegisterCategory` 在 `DllRegisterServer` 阶段成功，在 `Activate` 阶段失败——category 注册必须在注册服务器时完成
 
-### 按键处理状态（2026-05-03）
-
-**已解决**：
-- `ITfContextKeyEventSink::OnKeyDown` 现在正确创建 edit session 插入文字
-- 空格键选第一候选词，数字键选对应候选词
-- 光标移到插入文字末尾
-
-### windows-rs 升级 0.58 → 0.62（2026-05-03）
+### windows-rs 升级到 0.62（2026-05-03）
 
 **变更**：
 - `Option<&T>` 参数改为 `windows::core::Ref<'_, T>`（COM 接口方法签名变化）
@@ -273,43 +253,6 @@ Esc 取消 → 拼音文字从应用文档中清除
 - 新增 `Win32_System_Variant` feature（`VARIANT` 类型支持）
 
 **注意**：`crates/tsf/` 独立于 workspace，依赖版本冲突需单独管理。
-
-### 内联拼音显示修复（2026-05-05）— 已修复
-
-**现象**：
-- 键入拼音（如 `nihao`）时，Notepad 中**不显示任何 inline 文本**
-- 候选框正常弹出、候选词显示正常
-- 回车后文字正常上屏（Commit 路径正常）
-- 拼音叠加：输入 `a`→`a`，`b`→`aab`，`c`→`aababc`
-
-**根因**：
-1. `StartComposition` 在所有测试条件下都返回 `E_INVALIDARG`（参数错误）。原因不明，可能与 Notepad 的 TSF 文本存储实现有关
-2. 因为没有 composition，每次按键都从光标位置重新插入**完整拼音缓冲**（如 "ab"、"abc"），而非替换前一次文本
-
-**修复**（`edit_session.rs` + `tip.rs`）：
-- 放弃依赖 `ITfContextComposition::StartComposition`
-- 新增 `preadit_range: Rc<RefCell<Option<ITfRange>>>` 字段，在 PyrustTip 和 CompositionEditSession 之间共享
-- 首次按键：`GetSelection` → 光标范围 → `SetText` 插入 → 存储 `ITfRange` 到 `preadit_range`
-- 后续按键：用存储的 range → `SetText` **替换**（而非重新插入）
-- 提交/清除：`SetText` 最终文本 → 清除 `preadit_range`
-- `handle_keypress` 中 bridge 借用改为块作用域，避免与 cleanup 段冲突
-- 所有 `RequestEditSession` 调用添加错误日志（不再静默丢弃）
-
-**关键教训**：
-- `ITfRange::SetText` 后 range 被折叠到文本末尾（0 字符），需要 `ShiftStart(-N)` 展开
-- `GUID_PROP_COMPOSING` 是 TSF 只读属性，TIP 调用 `SetValue` 会返回 `E_INVALIDARG`
-- `ITfCategoryMgr::RegisterCategory` 在 `DllRegisterServer` 阶段成功，在 `Activate` 阶段失败——category 注册必须在注册服务器时完成
-
-### 拼音下划线（未解决）— 已知限制
-
-**状态**：display attribute 的 category 注册和 GUID atom 注册均已成功，`SetValue(GUID_PROP_ATTRIBUTE)` 返回成功，`GetDisplayAttributeInfo` 被 TSF 调用。但下划线不渲染。
-
-**推测根因**：TSF 的 display attribute 渲染依赖 active composition（通过 `StartComposition` 创建）。由于 `StartComposition` 始终返回 `E_INVALIDARG`，display attribute 被忽略。
-
-**保留的代码**：
-- `display_attrs.rs`：`InputDisplayAttr`（TF_LS_DOT 虚线）和 `ConvertedDisplayAttr`
-- `registry.rs`：`GUID_TFCAT_DISPLAYATTRIBUTE_PROVIDER` 和 `GUID_TFCAT_DISPLAYATTRIBUTE` 类别注册
-- 后续只需解决 `StartComposition` 问题，下划线即可自动生效
 
 ## 调试经验 (Lessons Learned)
 
@@ -344,7 +287,7 @@ Esc 取消 → 拼音文字从应用文档中清除
 
 ### TSF crate 编译注意事项
 
-- `crates/tsf/` **不在 workspace members 中**（因为依赖 windows 0.58，与 workspace 的 windows 0.48/0.52 冲突）
+- `crates/tsf/` **不在 workspace members 中**（因为依赖 windows 0.62，独立 workspace 避免版本冲突）
 - 编译 tsf 需进入该目录单独执行：`cd crates/tsf && cargo check --target x86_64-pc-windows-gnu`
 - `HINSTANCE` 初始值必须是 `HINSTANCE(std::ptr::null_mut())`，不能用 `HINSTANCE(0)`（类型不匹配）
 
@@ -357,14 +300,8 @@ Esc 取消 → 拼音文字从应用文档中清除
 **教训**：
 1. **dev_input_loop 中不要在行末自动发送会改变状态的控制键**（如 Enter、Esc）。保持输入缓冲区在用户未明确操作前不变。
 2. **诊断 UI 不更新时，先确认数据是否真的到达了 UI**。用 `eprintln!` 分别在发送端和接收端打印，确认 channel 是否畅通。
-3. **egui 的 `update()` 调用频率（~20Hz）远低于 keystroke 频率**。`try_recv()` 的 while 循环会一次消费所有积压消息，最终状态取决于最后一条消息。
+3. **UI 刷新频率远低于 keystroke 频率**。`try_recv()` 的 while 循环会一次消费所有积压消息，最终状态取决于最后一条消息（此教训适用于 egui 和 GDI 渲染）。
 4. **`crossbeam_channel::unbounded()` 的 `Receiver` 支持 Clone**，但每条消息只投递给一个 receiver。确保只有一个 receiver 在消费。
-
-### egui 在 Windows 上的注意事项
-
-- **非主线程运行需要 `with_any_thread(true)`**（winit Windows 扩展），否则 `eframe::run_native` 不会启动事件循环。
-- **默认字体不支持中文**，需在 `eframe::CreationContext` 中加载系统字体（如 `msyh.ttc`）。
-- **透明窗口 (`with_transparent(true)`) 可能导致窗口不可见**，调试阶段建议使用 `with_decorations(true)`。
 
 ### 字典文件格式
 

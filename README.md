@@ -5,14 +5,17 @@
 ## 特性
 
 - **三线程架构**：系统回调、工作逻辑、UI 渲染完全分离，打字永不卡顿
-- **横版候选窗**：现代输入法风格，hover 高亮，点击选词，跟随光标定位
+- **内联拼音显示**：拼音直接写入应用文档（composition string），选词后替换为中文
+- **中文标点映射**：中文模式下自动映射全角标点，支持引号配对交替
+- **Shift 中英切换**：Shift 键一键切换中英文，有拼音时先上屏再切换
+- **横版候选窗**：Win32 + GDI 自绘，hover 高亮，点击选词，跟随光标定位
 - **完全离线**：零网络依赖，所有词库本地存储，隐私零泄露
 - **10 万基础词库**：基于结巴分词词频数据，覆盖日常用词
 - **上文联想**：基于 Bigram 模型的上下文候选词加分
-- **模糊音支持**：翘舌/平舌、前后鼻音、声母混淆等 8 组规则
-- **个人词库**：SQLite 持久化，自动学习用户输入习惯
+- **模糊音支持**：翘舌/平舌、前后鼻音、声母混淆等 8 组规则（可配置开关）
+- **个人词库**：SQLite 持久化，自动学习用户输入习惯，权重衰减
 - **配置热重载**：TOML 配置文件修改即生效
-- **跨平台**：支持 Windows (TSF) 和 macOS (Input Method Kit)
+- **跨平台**：支持 Windows (TSF)，macOS (Input Method Kit) 待开发
 
 ## 技术栈
 
@@ -30,13 +33,13 @@
 ```
 pyrust/
 ├── crates/
-│   ├── engine-core/      # 拼音引擎核心：状态机、切分、排序
-│   ├── dict/             # 词库引擎：mmap DAT 读取、用户词库
+│   ├── engine-core/      # 拼音引擎核心：状态机、切分、排序、标点映射
+│   ├── dict/             # 词库引擎：mmap DAT 读取、用户词库 SQLite
 │   ├── ui-crate/         # Win32 + GDI 候选词窗口渲染
-│   ├── platform-adapter/ # 操作系统 IME 接入层
-│   ├── tsf/              # Windows TSF COM DLL (cdylib)
-│   └── yas-config/       # 全局配置管理
-├── dict-compiler/        # 离线词库编译工具
+│   ├── platform-adapter/ # 平台抽象层：ImeBackend trait + dev/win/mac adapter
+│   ├── tsf/              # Windows TSF COM DLL — 独立 Cargo workspace
+│   └── yas-config/       # 全局 TOML 配置管理
+├── dict-compiler/        # 离线词库编译工具（文本→mmap DAT）
 ├── pyrust/               # 二进制入口 (dev EXE)
 ├── scripts/              # 辅助脚本（词库生成等）
 └── assets/               # 基础数据文件
@@ -138,23 +141,35 @@ bigram_data_path = "bigram.dat"
 
 ## 开发状态
 
-- [x] 拼音引擎核心（状态机、音节切分、候选排序）
-- [x] mmap 词库（DAT 编译与加载）
-- [x] Win32 + GDI 候选词窗口（横版、hover、点击选词、跟随光标）
-- [x] 个人词库（SQLite 持久化）
+**引擎核心**
+- [x] 拼音引擎核心（状态机、DP 切分 + 贪心回退、候选排序）
+- [x] 中文标点自动映射（全角标点 + 引号配对）
+- [x] Shift 中英切换（有拼音时先上屏再切换）
+- [x] 回车原样上屏（拼音缓冲区原始文本提交）
 - [x] 上文联想 (Bigram)
-- [x] 模糊音（8 组规则）
+- [x] 模糊音（8 组规则，可配置开关）
 - [x] 配置热重载
-- [x] 10 万基础词库
-- [x] Windows TSF — DLL 编译 + COM 接口实现（ITfTextInputProcessorEx、ITfKeyEventSink 等 7 个接口）
-- [x] Windows TSF — Sink 注册（ITfThreadMgrEventSink + ITfKeyEventSink + ITfContextKeyEventSink + ITfThreadFocusSink）
-- [x] Windows TSF — 注册表修复（IME 可常驻 Windows 键盘列表）
-- [x] Windows TSF — Explorer 崩溃修复（延迟 UI 线程初始化）
-- [x] Windows TSF — 键盘 Compartment + 文本提交（ITfRange::SetText）
-- [x] Win32 + GDI 候选框（替换 egui，解决 DLL 环境 OpenGL 问题）
+
+**词库**
+- [x] mmap 基础词库（DAT 编译与加载，10 万词）
+- [x] 个人词库（SQLite 持久化，自动学习 + 权重衰减）
+
+**Windows TSF**
+- [x] DLL 编译 + COM 接口实现（7 个接口：ITfTextInputProcessorEx、ITfKeyEventSink 等）
+- [x] Sink 注册（ITfThreadMgrEventSink + ITfKeyEventSink + ITfContextKeyEventSink + ITfThreadFocusSink）
+- [x] 注册表修复（IME 常驻 Windows 键盘列表）
+- [x] Explorer 崩溃修复（egui → Win32+GDI 迁移）
+- [x] 键盘 Compartment + 文本提交（ITfRange::SetText）
+- [x] 内联拼音显示（ITfRange 手动跟踪，composition string）
 - [x] 候选框跟随光标（TSF ITfContextView::GetTextExt）
-- [x] 贪心拼音切分 + 多字候选词回退
-- [ ] Windows TSF — 按键路由验证（Windows 11 25H2 兼容性）
+- [x] 线程生命周期管理 + IPC 超时优化
+- [ ] 拼音下划线渲染（StartComposition E_INVALIDARG 待解决，display attribute 代码已就绪）
+- [ ] Windows 11 多应用兼容性测试
+
+**候选窗 UI**
+- [x] Win32 + GDI 候选窗（横版、hover 高亮、点击选词、跟随光标）
+
+**跨平台**
 - [ ] macOS Input Method Kit 接入
 - [ ] 集成测试
 
