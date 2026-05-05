@@ -269,6 +269,13 @@ fn worker_loop(
                     engine_core::Action::Commit(text) | engine_core::Action::CommitRaw(text) => {
                         Response::Committed(text)
                     }
+                    engine_core::Action::CommitAndPreedit { committed, preedit } => {
+                        Response::CommittedWithPreedit(committed, preedit)
+                    }
+                    engine_core::Action::UpdatePreedit { text, .. } => {
+                        Response::ConsumedWithText(text)
+                    }
+                    engine_core::Action::ClearPreedit => Response::Consumed,
                     _ => Response::Consumed,
                 };
                 tlog!("[tsf] worker: sending response");
@@ -319,8 +326,8 @@ fn build_ui_update(engine: &EngineCore, caret_pos: Option<(i32, i32)>) -> UiUpda
         .collect();
     UiUpdate {
         candidates: ui_candidates,
-        pinyin: engine.pinyin_buffer().raw_input().to_string(),
-        cursor_position: engine.pinyin_buffer().cursor_position(),
+        pinyin: String::new(), // Pinyin shown in application via composition, not in candidate window
+        cursor_position: 0,
         position: caret_pos.unwrap_or((0, 0)),
         visible: !engine.pinyin_buffer().is_empty(),
     }

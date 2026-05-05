@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use windows::core::{
     implement, ComObjectInterface, Error, Interface, Result as WinResult, GUID, HRESULT,
@@ -7,17 +8,17 @@ use windows::Win32::System::Com::{CoFreeUnusedLibraries, IClassFactory, IClassFa
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
 use windows::Win32::UI::TextServices::{
-    ITfCompartmentMgr, ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext,
-    ITfContextKeyEventSink, ITfContextKeyEventSink_Impl, ITfDisplayAttributeProvider,
-    ITfDisplayAttributeProvider_Impl, ITfDocumentMgr, ITfEditSession, ITfKeyEventSink,
-    ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfSource, ITfTextInputProcessor,
-    ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl, ITfTextInputProcessor_Impl,
-    ITfThreadFocusSink, ITfThreadFocusSink_Impl, ITfThreadMgr, ITfThreadMgrEventSink,
-    ITfThreadMgrEventSink_Impl, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
+    ITfCompartmentMgr, ITfComposition, ITfCompositionSink,
+    ITfCompositionSink_Impl, ITfContext, ITfContextKeyEventSink, ITfContextKeyEventSink_Impl,
+    ITfDisplayAttributeProvider, ITfDisplayAttributeProvider_Impl, ITfDocumentMgr, ITfEditSession,
+    ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfRange, ITfSource,
+    ITfTextInputProcessor, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
+    ITfTextInputProcessor_Impl, ITfThreadFocusSink, ITfThreadFocusSink_Impl, ITfThreadMgr,
+    ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
 };
 
 use crate::bridge::TsfBridge;
-use crate::edit_session::CaretPosEditSession;
+use crate::edit_session::{CaretPosEditSession, CompositionEditSession};
 #[allow(unused_imports)]
 use crate::tlog;
 
@@ -86,11 +87,14 @@ pub struct PyrustTip {
     #[allow(dead_code)]
     is_password: AtomicBool,
     current_doc_mgr: RefCell<Option<ITfDocumentMgr>>,
-    composition: RefCell<Option<ITfComposition>>,
+    composition: Rc<RefCell<Option<ITfComposition>>>,
     sink_cookie: RefCell<Option<u32>>,
     context_key_cookies: RefCell<Vec<u32>>,
     focus_sink_cookie: RefCell<Option<u32>>,
     shift_pending: Cell<bool>,
+    /// Tracked preedit text range — used for text replacement without
+    /// requiring StartComposition to succeed.
+    preedit_range: Rc<RefCell<Option<ITfRange>>>,
 }
 
 impl PyrustTip {
@@ -103,11 +107,12 @@ impl PyrustTip {
             is_active: AtomicBool::new(false),
             is_password: AtomicBool::new(false),
             current_doc_mgr: RefCell::new(None),
-            composition: RefCell::new(None),
+            composition: Rc::new(RefCell::new(None)),
             sink_cookie: RefCell::new(None),
             context_key_cookies: RefCell::new(Vec::new()),
             focus_sink_cookie: RefCell::new(None),
             shift_pending: Cell::new(false),
+            preedit_range: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -133,25 +138,20 @@ impl PyrustTip {
         }
         if is_down {
             self.shift_pending.set(true);
-            ShiftResult::Consumed
-        } else {
-            if self.shift_pending.get() {
-                self.shift_pending.set(false);
-                // Check if there's pinyin to commit before toggling.
-                let has_pinyin = self.bridge.borrow().as_ref().map_or(false, |b| b.has_pinyin());
-                if has_pinyin {
-                    ShiftResult::CommitThenToggle
-                } else {
-                    if let Some(ref bridge) = *self.bridge.borrow() {
-                        let _ = bridge.req_tx().send(crate::Request::ToggleMode);
-                        tlog!("[tsf] Shift toggle: mode switched (no pinyin to commit)");
-                    }
-                    ShiftResult::Consumed
-                }
-            } else {
-                ShiftResult::Consumed
-            }
+            return ShiftResult::Consumed;
         }
+        if !self.shift_pending.get() {
+            return ShiftResult::Consumed;
+        }
+        self.shift_pending.set(false);
+        if self.bridge.borrow().as_ref().map_or(false, |b| b.has_pinyin()) {
+            return ShiftResult::CommitThenToggle;
+        }
+        if let Some(ref bridge) = *self.bridge.borrow() {
+            let _ = bridge.req_tx().send(crate::Request::ToggleMode);
+            tlog!("[tsf] Shift toggle: mode switched (no pinyin to commit)");
+        }
+        ShiftResult::Consumed
     }
 
     fn get_modifiers() -> crate::Modifiers {
@@ -183,45 +183,6 @@ impl PyrustTip {
             0x41..=0x5A | 0x30..=0x39 | 0x20 | 0x08 | 0x0D | 0x1B | 0x25..=0x28
             | 0xBC | 0xBE | 0xBA | 0xBF | 0xBB | 0xBD | 0xDC | 0xDE | 0xDB | 0xDD
         )
-    }
-
-    fn handle_keypress(&self, context: &ITfContext, vk: u32) -> WinResult<windows::core::BOOL> {
-        let binding = self.bridge.borrow();
-        let bridge = match *binding {
-            Some(ref b) => b,
-            None => {
-                tlog!("[tsf] handle_keypress: no bridge, passing through");
-                return Ok(false.into());
-            }
-        };
-        let modifiers = Self::get_modifiers();
-        let caret_pos = self.get_caret_pos(context);
-        let (resp_tx, resp_rx) = crate::oneshot::channel();
-        let _ = bridge.req_tx().send(crate::Request::KeyPress {
-            vk,
-            modifiers,
-            caret_pos,
-            response: resp_tx,
-        });
-        match resp_rx.recv() {
-            Some(crate::Response::Committed(text)) => {
-                tlog!("[tsf] handle_keypress: Committed '{}'", text);
-                use windows::Win32::UI::TextServices::TF_ES_READWRITE;
-                let edit_session: ITfEditSession =
-                    crate::edit_session::CommitEditSession::new(context.clone(), text).into();
-                // SAFETY: context is a valid ITfContext. edit_session implements ITfEditSession.
-                let _ = unsafe {
-                    context.RequestEditSession(
-                        *self.client_id.borrow(),
-                        &edit_session,
-                        TF_ES_READWRITE,
-                    )
-                };
-                Ok(true.into())
-            }
-            Some(crate::Response::Consumed) => Ok(true.into()),
-            Some(crate::Response::Passthrough) | None => Ok(false.into()),
-        }
     }
 
     /// Get the caret screen position via a synchronous TSF edit session.
@@ -266,6 +227,125 @@ impl PyrustTip {
 
         tlog!("[tsf] get_caret_pos: result={:?}", pos);
         pos
+    }
+}
+
+impl PyrustTip_Impl {
+    /// Commit text into the document. If composition is active, replaces composition
+    /// text and ends it. Otherwise inserts directly at the cursor.
+    fn commit_text(
+        &self,
+        context: &ITfContext,
+        text: String,
+        flags: windows::Win32::UI::TextServices::TF_CONTEXT_EDIT_CONTEXT_FLAGS,
+    ) {
+        let has_range = self.preedit_range.borrow().is_some();
+        if self.composition.borrow().is_some() || has_range {
+            let session: ITfEditSession = CompositionEditSession::commit(
+                context.clone(),
+                text,
+                Rc::clone(&self.composition),
+                Rc::clone(&self.preedit_range),
+            )
+            .into();
+            if let Err(e) = unsafe {
+                context.RequestEditSession(*self.client_id.borrow(), &session, flags)
+            } {
+                tlog!("[tsf] commit_text composition FAILED: {:?}", e);
+            }
+        } else {
+            let session: ITfEditSession =
+                crate::edit_session::CommitEditSession::new(context.clone(), text).into();
+            if let Err(e) = unsafe {
+                context.RequestEditSession(*self.client_id.borrow(), &session, flags)
+            } {
+                tlog!("[tsf] commit_text simple FAILED: {:?}", e);
+            }
+        }
+    }
+
+    fn handle_keypress(&self, context: &ITfContext, vk: u32) -> WinResult<windows::core::BOOL> {
+        let resp_rx = {
+            let binding = self.bridge.borrow();
+            match *binding {
+                Some(ref b) => {
+                    let modifiers = PyrustTip::get_modifiers();
+                    let caret_pos = self.get_caret_pos(context);
+                    let (tx, rx) = crate::oneshot::channel();
+                    let _ = b.req_tx().send(crate::Request::KeyPress {
+                        vk,
+                        modifiers,
+                        caret_pos,
+                        response: tx,
+                    });
+                    rx
+                }
+                None => {
+                    tlog!("[tsf] handle_keypress: no bridge, passing through");
+                    return Ok(false.into());
+                }
+            }
+        };
+
+        use windows::Win32::UI::TextServices::{TF_ES_READWRITE, TF_ES_SYNC};
+        let flags = TF_ES_READWRITE | TF_ES_SYNC;
+        let comp_rc = Rc::clone(&self.composition);
+        let pr_rc = Rc::clone(&self.preedit_range);
+
+        let result: WinResult<windows::core::BOOL> = match resp_rx.recv() {
+            Some(crate::Response::ConsumedWithText(text)) => {
+                tlog!("[tsf] handle_keypress: ConsumedWithText '{}'", text);
+                let session: ITfEditSession = CompositionEditSession::update(
+                    context.clone(),
+                    text,
+                    comp_rc,
+                    pr_rc,
+                    None,
+                )
+                .into();
+                if let Err(e) = unsafe {
+                    context.RequestEditSession(*self.client_id.borrow(), &session, flags)
+                } {
+                    tlog!("[tsf] handle_keypress: composition edit session FAILED: {:?}", e);
+                }
+                Ok(true.into())
+            }
+            Some(crate::Response::CommittedWithPreedit(text, preedit)) => {
+                tlog!("[tsf] handle_keypress: CommittedWithPreedit '{}' + '{}'", text, preedit);
+                self.commit_text(context, text, flags);
+                // Start new composition with preedit — clear old preedit_range first
+                *self.preedit_range.borrow_mut() = None;
+                let pr_rc2 = Rc::clone(&self.preedit_range);
+                let session: ITfEditSession =
+                    CompositionEditSession::update(context.clone(), preedit, comp_rc, pr_rc2, None)
+                        .into();
+                if let Err(e) = unsafe {
+                    context.RequestEditSession(*self.client_id.borrow(), &session, flags)
+                } {
+                    tlog!("[tsf] handle_keypress: preedit composition edit session FAILED: {:?}", e);
+                }
+                Ok(true.into())
+            }
+            Some(crate::Response::Committed(text)) => {
+                tlog!("[tsf] handle_keypress: Committed '{}'", text);
+                drop(comp_rc);
+                self.commit_text(context, text, flags);
+                Ok(true.into())
+            }
+            Some(crate::Response::Consumed) => Ok(true.into()),
+            Some(crate::Response::Passthrough) | None => Ok(false.into()),
+        };
+
+        // Clean up composition if engine has no more pinyin buffer
+        if result.as_ref().map_or(false, |b| b.as_bool()) {
+            let has_pinyin = self.bridge.borrow().as_ref().map_or(false, |b| b.has_pinyin());
+            if !has_pinyin && self.composition.borrow().is_some() {
+                tlog!("[tsf] handle_keypress: pinyin empty, clearing stale composition");
+                self.commit_text(context, String::new(), flags);
+            }
+        }
+
+        result
     }
 }
 
@@ -444,6 +524,7 @@ impl ITfTextInputProcessor_Impl for PyrustTip_Impl {
         *self.focus_sink_cookie.borrow_mut() = None;
 
         *self.composition.borrow_mut() = None;
+        *self.preedit_range.borrow_mut() = None;
         *self.context_key_cookies.borrow_mut() = Vec::new();
         if let Some(mut b) = self.bridge.borrow_mut().take() {
             b.shutdown();
@@ -663,15 +744,25 @@ impl ITfDisplayAttributeProvider_Impl for PyrustTip_Impl {
     fn EnumDisplayAttributeInfo(
         &self,
     ) -> WinResult<windows::Win32::UI::TextServices::IEnumTfDisplayAttributeInfo> {
-        tlog!("[tsf] EnumDisplayAttributeInfo -> returning empty enum");
-        Ok(crate::display_attrs::EmptyEnumDisplayAttr {}.into())
+        tlog!("[tsf] EnumDisplayAttributeInfo -> returning pyrust attrs");
+        Ok(crate::display_attrs::PyrustEnumDisplayAttr::new().into())
     }
     fn GetDisplayAttributeInfo(
         &self,
-        _guid: *const GUID,
+        guid: *const GUID,
     ) -> WinResult<windows::Win32::UI::TextServices::ITfDisplayAttributeInfo> {
-        tlog!("[tsf] GetDisplayAttributeInfo -> E_NOTIMPL");
-        Err(Error::new(HRESULT(0x80004001u32 as i32), "Not implemented"))
+        // SAFETY: guid is a valid pointer provided by TSF.
+        let g = unsafe { *guid };
+        if g == crate::display_attrs::GUID_ATTR_INPUT {
+            tlog!("[tsf] GetDisplayAttributeInfo -> Input");
+            Ok(crate::display_attrs::InputDisplayAttr.into())
+        } else if g == crate::display_attrs::GUID_ATTR_CONVERTED {
+            tlog!("[tsf] GetDisplayAttributeInfo -> Converted");
+            Ok(crate::display_attrs::ConvertedDisplayAttr.into())
+        } else {
+            tlog!("[tsf] GetDisplayAttributeInfo -> unknown guid");
+            Err(Error::new(HRESULT(0x80004001u32 as i32), "Not implemented"))
+        }
     }
 }
 

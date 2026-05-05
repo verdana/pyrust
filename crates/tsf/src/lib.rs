@@ -137,6 +137,10 @@ pub enum Request {
 #[derive(Debug)]
 pub enum Response {
     Consumed,
+    /// Pinyin buffer updated — carries current preedit text for composition.
+    ConsumedWithText(String),
     Passthrough,
     Committed(String),
+    /// Text committed + new preedit started (e.g., letter while composing).
+    CommittedWithPreedit(String, String),
 }

@@ -50,6 +50,8 @@ pub enum Action {
     Passthrough,
     Commit(String),
     CommitRaw(String),
+    /// Commit current text AND start new preedit (e.g., letter while composing).
+    CommitAndPreedit { committed: String, preedit: String },
     UpdateCandidates,
     UpdatePreedit { text: String, cursor: usize },
     ClearPreedit,
@@ -112,11 +114,18 @@ impl EngineCore {
         }
 
         let state = self.state.current();
-        match state {
+        let action = match state {
             state_machine::State::Idle => self.handle_idle(key),
             state_machine::State::Pending => self.handle_pending(key),
             state_machine::State::Composing => self.handle_composing(key),
+        };
+        // Post-process: if pinyin buffer is now empty, signal composition end.
+        if matches!(action, Action::UpdateCandidates | Action::UpdatePreedit { .. })
+            && self.pinyin_buffer.is_empty()
+        {
+            return Action::ClearPreedit;
         }
+        action
     }
 
     pub fn flush_user_dict(&mut self) {
@@ -133,7 +142,10 @@ impl EngineCore {
                 self.pinyin_buffer.insert_at_cursor(c);
                 self.update_candidates();
                 self.state.transition_to(state_machine::State::Pending);
-                Action::UpdateCandidates
+                Action::UpdatePreedit {
+                    text: self.pinyin_buffer.raw_input().to_string(),
+                    cursor: self.pinyin_buffer.cursor_position(),
+                }
             }
             _ => Action::Passthrough,
         }
@@ -144,7 +156,10 @@ impl EngineCore {
             Some(c @ 'a'..='z') => {
                 self.pinyin_buffer.insert_at_cursor(c);
                 self.update_candidates();
-                Action::UpdateCandidates
+                Action::UpdatePreedit {
+                    text: self.pinyin_buffer.raw_input().to_string(),
+                    cursor: self.pinyin_buffer.cursor_position(),
+                }
             }
             Some(' ') => self.commit_current(0, 1),
             Some(n @ '1'..='9') => {
@@ -174,17 +189,20 @@ impl EngineCore {
                 if self.pinyin_buffer.is_empty() {
                     self.candidates.clear();
                     self.state.transition_to(state_machine::State::Idle);
-                    Action::UpdateCandidates
+                    Action::ClearPreedit
                 } else {
                     self.update_candidates();
-                    Action::UpdateCandidates
+                    Action::UpdatePreedit {
+                        text: self.pinyin_buffer.raw_input().to_string(),
+                        cursor: self.pinyin_buffer.cursor_position(),
+                    }
                 }
             }
             0x1B => {
                 self.pinyin_buffer.clear();
                 self.candidates.clear();
                 self.state.transition_to(state_machine::State::Idle);
-                Action::UpdateCandidates
+                Action::ClearPreedit
             }
             0x25..=0x28 => {
                 if vk == 0x25 {
@@ -193,7 +211,10 @@ impl EngineCore {
                     self.pinyin_buffer.move_cursor(1);
                 }
                 self.update_candidates();
-                Action::UpdateCandidates
+                Action::UpdatePreedit {
+                    text: self.pinyin_buffer.raw_input().to_string(),
+                    cursor: self.pinyin_buffer.cursor_position(),
+                }
             }
             _ => Action::Passthrough,
         }
@@ -262,10 +283,16 @@ impl EngineCore {
                 self.pinyin_buffer.insert_at_cursor(c);
                 self.update_candidates();
                 self.state.transition_to(state_machine::State::Pending);
-                if let Some(text) = committed {
-                    Action::Commit(text)
+                if let Some(committed_text) = committed {
+                    Action::CommitAndPreedit {
+                        committed: committed_text,
+                        preedit: self.pinyin_buffer.raw_input().to_string(),
+                    }
                 } else {
-                    Action::UpdateCandidates
+                    Action::UpdatePreedit {
+                        text: self.pinyin_buffer.raw_input().to_string(),
+                        cursor: self.pinyin_buffer.cursor_position(),
+                    }
                 }
             }
             Some(' ') => {
@@ -292,6 +319,7 @@ impl EngineCore {
         self.pinyin_buffer.clear();
         self.candidates.clear();
         self.last_committed = None;
+        self.last_quote_was_open = false;
         self.state.transition_to(state_machine::State::Idle);
     }
 
@@ -318,6 +346,10 @@ impl EngineCore {
 
     pub fn is_zh_mode(&self) -> bool {
         self.zh_mode
+    }
+
+    pub fn pinyin_buffer_empty(&self) -> bool {
+        self.pinyin_buffer.is_empty()
     }
 
     fn update_candidates(&mut self) {
@@ -415,11 +447,9 @@ impl EngineCore {
             .into_iter()
             .map(|e| {
                 let mut score = e.frequency as f64 + e.weight as f64;
-                // Freshness boost: +30% for user entries updated within 7 days
                 if e.is_user && e.updated_at > 0 && now - e.updated_at < 604_800 {
                     score *= 1.3;
                 }
-                // Bigram boost: boost candidates that commonly follow the last committed word
                 if bigram_enabled {
                     if let Some(ref prev) = self.last_committed {
                         let boost = self.bigram.get_boost(prev, &e.text);
@@ -435,8 +465,7 @@ impl EngineCore {
                 }
             })
             .fold(Vec::new(), |mut acc, c| {
-                let text = c.text.clone();
-                if let Some(existing) = acc.iter_mut().find(|e: &&mut Candidate| e.text == text) {
+                if let Some(existing) = acc.iter_mut().find(|e| e.text == c.text) {
                     if c.score > existing.score {
                         *existing = c;
                     }

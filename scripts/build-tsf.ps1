@@ -19,7 +19,7 @@ if (-not $isAdmin) {
 
 # Phase 1: Kill processes that lock TSF DLLs
 Write-Host "[1/3] Killing text-input processes..." -ForegroundColor Cyan
-$procs = @("TextInputHost.exe", "ctfmon.exe", "ApplicationFrameHost.exe")
+$procs = @("notepad.exe", "TextInputHost.exe", "ctfmon.exe", "ApplicationFrameHost.exe")
 foreach ($p in $procs) {
     Stop-Process -Name ($p -replace '\.exe$','') -Force -ErrorAction SilentlyContinue
 }

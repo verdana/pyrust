@@ -15,6 +15,11 @@ use windows::Win32::UI::TextServices::{
     GUID_TFCAT_TIP_KEYBOARD,
 };
 
+/// MSDN GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER — {046B8F80-1647-11D3-95F0-00004B6C45C3}
+const GUID_CAT_DISPLAY_ATTR_PROVIDER: GUID = GUID::from_u128(0x046B8F80_1647_11D3_95F0_00004B6C45C3);
+/// MSDN GUID_TFCAT_DISPLAYATTRIBUTE — {C5A6AFB2-E4E6-4D68-9FCD-5E37FB1437E3}
+const GUID_CAT_DISPLAY_ATTR: GUID = GUID::from_u128(0xC5A6AFB2_E4E6_4D68_9FCD_5E37FB1437E3);
+
 fn reg_log(msg: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -150,6 +155,34 @@ fn register_categories_via_com() -> Result<(), String> {
             &CLSID_PYRUST_TIP,
         );
         reg_log("[tsf] RegisterCategory(COMLESS) done");
+
+        // Display attribute provider — tells TSF our TIP provides display attributes.
+        cat_mgr
+            .RegisterCategory(
+                &CLSID_PYRUST_TIP,
+                &GUID_CAT_DISPLAY_ATTR_PROVIDER,
+                &CLSID_PYRUST_TIP,
+            )
+            .map_err(|e| {
+                reg_log(&format!("[tsf] RegisterCategory(DISPLAY_ATTR_PROVIDER) failed: {e}"));
+                format!("RegisterCategory(DISPLAY_ATTR_PROVIDER) failed: {e}")
+            })?;
+        reg_log("[tsf] RegisterCategory(DISPLAY_ATTR_PROVIDER) OK");
+
+        // Register each custom display attribute GUID so TSF knows which
+        // provider to query for visual properties.
+        for (name, attr_guid) in [
+            ("INPUT", &crate::display_attrs::GUID_ATTR_INPUT),
+            ("CONVERTED", &crate::display_attrs::GUID_ATTR_CONVERTED),
+        ] {
+            cat_mgr
+                .RegisterCategory(&CLSID_PYRUST_TIP, &GUID_CAT_DISPLAY_ATTR, attr_guid)
+                .map_err(|e| {
+                    reg_log(&format!("[tsf] RegisterCategory(DISPLAY_ATTR {name}) failed: {e}"));
+                    format!("RegisterCategory(DISPLAY_ATTR {name}) failed: {e}")
+                })?;
+            reg_log(&format!("[tsf] RegisterCategory(DISPLAY_ATTR {name}) OK"));
+        }
 
         reg_log("[tsf] register_categories_via_com END");
         Ok(())

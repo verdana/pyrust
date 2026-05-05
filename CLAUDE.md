@@ -26,6 +26,12 @@
 - Windows 构建目录：`/mnt/c/Users/Verdana/Desktop/pyrust/`
 - 修改 TSF 代码后，需手动复制到 Windows 目录：`cp crates/tsf/src/*.rs /mnt/c/Users/Verdana/Desktop/pyrust/crates/tsf/src/`
 
+### 代码同步规则（NEVER）
+- **NEVER** 从 Windows 测试目录（`/mnt/c/Users/Verdana/Desktop/pyrust/`）反向复制代码到 WSL 工作区
+- **NEVER** 读取 Windows 目录中的源文件来覆盖 WSL 中的文件
+- 代码同步**只能单向**：WSL → Windows
+- Windows 目录仅用于编译测试，不是代码源
+
 ## 常用命令
 ```bash
 # 检查代码 (Linux)
@@ -217,6 +223,39 @@ cargo build --release --target x86_64-pc-windows-gnu
 - `tsf/src/tip.rs`：`should_consume_key` 新增标点 VK 码消费
 - `tsf/src/bridge.rs`：`char_from_vk` 新增标点 VK→ASCII 字符转换
 
+### TSF Composition String（拼音上屏 + 下划线）（2026-05-05）
+
+**功能**：拼音直接写入应用文档（带下划线），候选词选中后替换为最终文字。现代输入法标准行为。
+
+**输入流程**：
+```
+用户键入 n → 应用显示 "n"（实线下划线，composition 状态）
+用户键入 i → 应用显示 "ni"（实线下划线）
+用户按空格 → "ni" 替换为 "你"（点状下划线，已选候选词）
+最终确认 → "你"（无下划线，普通文字）
+Esc 取消 → 拼音文字从应用文档中清除
+```
+
+**架构**：
+- `engine-core/src/lib.rs`：`Action::UpdatePreedit` 携带拼音文本，`Action::ClearPreedit` 表示拼音清空，`Action::CommitAndPreedit` 表示提交+新输入
+- `tsf/src/lib.rs`：`Response::ConsumedWithText(String)` 和 `Response::CommittedWithPreedit(String, String)`
+- `tsf/src/bridge.rs`：`Action::UpdatePreedit` → `ConsumedWithText`，`CommitAndPreedit` → `CommittedWithPreedit`
+- `tsf/src/edit_session.rs`：`CompositionEditSession` — 管理 `StartComposition` / `SetText` / `EndComposition` 生命周期
+- `tsf/src/display_attrs.rs`：`InputDisplayAttr`（`TF_LS_SOLID`）和 `ConvertedDisplayAttr`（`TF_LS_DOT`），`PyrustEnumDisplayAttr` 枚举器
+- `tsf/src/tip.rs`：`handle_keypress` 匹配 `ConsumedWithText` → 更新 composition，`Committed` → 结束 composition
+
+**关键 API**：
+- `ITfContextComposition::StartComposition(ec, range, None)` → 返回 `ITfComposition`
+- `comp.GetRange()` → 获取 composition 范围
+- `range.SetText(ec, 0, &text)` → 替换 composition 文字
+- `comp.EndComposition(ec)` → 结束 composition（文字留在文档中）
+
+**生命周期管理**：
+- `self.composition` 在 `StartComposition` 成功后赋值 `Some(comp)`
+- `OnCompositionTerminated` 回调中置为 `None`
+- `Deactivate` 中清理
+- `handle_keypress` 结束时检查引擎 `pinyin_buffer_empty()`，清理残留 composition
+
 ### 按键处理状态（2026-05-03）
 
 **已解决**：
@@ -234,6 +273,43 @@ cargo build --release --target x86_64-pc-windows-gnu
 - 新增 `Win32_System_Variant` feature（`VARIANT` 类型支持）
 
 **注意**：`crates/tsf/` 独立于 workspace，依赖版本冲突需单独管理。
+
+### 内联拼音显示修复（2026-05-05）— 已修复
+
+**现象**：
+- 键入拼音（如 `nihao`）时，Notepad 中**不显示任何 inline 文本**
+- 候选框正常弹出、候选词显示正常
+- 回车后文字正常上屏（Commit 路径正常）
+- 拼音叠加：输入 `a`→`a`，`b`→`aab`，`c`→`aababc`
+
+**根因**：
+1. `StartComposition` 在所有测试条件下都返回 `E_INVALIDARG`（参数错误）。原因不明，可能与 Notepad 的 TSF 文本存储实现有关
+2. 因为没有 composition，每次按键都从光标位置重新插入**完整拼音缓冲**（如 "ab"、"abc"），而非替换前一次文本
+
+**修复**（`edit_session.rs` + `tip.rs`）：
+- 放弃依赖 `ITfContextComposition::StartComposition`
+- 新增 `preadit_range: Rc<RefCell<Option<ITfRange>>>` 字段，在 PyrustTip 和 CompositionEditSession 之间共享
+- 首次按键：`GetSelection` → 光标范围 → `SetText` 插入 → 存储 `ITfRange` 到 `preadit_range`
+- 后续按键：用存储的 range → `SetText` **替换**（而非重新插入）
+- 提交/清除：`SetText` 最终文本 → 清除 `preadit_range`
+- `handle_keypress` 中 bridge 借用改为块作用域，避免与 cleanup 段冲突
+- 所有 `RequestEditSession` 调用添加错误日志（不再静默丢弃）
+
+**关键教训**：
+- `ITfRange::SetText` 后 range 被折叠到文本末尾（0 字符），需要 `ShiftStart(-N)` 展开
+- `GUID_PROP_COMPOSING` 是 TSF 只读属性，TIP 调用 `SetValue` 会返回 `E_INVALIDARG`
+- `ITfCategoryMgr::RegisterCategory` 在 `DllRegisterServer` 阶段成功，在 `Activate` 阶段失败——category 注册必须在注册服务器时完成
+
+### 拼音下划线（未解决）— 已知限制
+
+**状态**：display attribute 的 category 注册和 GUID atom 注册均已成功，`SetValue(GUID_PROP_ATTRIBUTE)` 返回成功，`GetDisplayAttributeInfo` 被 TSF 调用。但下划线不渲染。
+
+**推测根因**：TSF 的 display attribute 渲染依赖 active composition（通过 `StartComposition` 创建）。由于 `StartComposition` 始终返回 `E_INVALIDARG`，display attribute 被忽略。
+
+**保留的代码**：
+- `display_attrs.rs`：`InputDisplayAttr`（TF_LS_DOT 虚线）和 `ConvertedDisplayAttr`
+- `registry.rs`：`GUID_TFCAT_DISPLAYATTRIBUTE_PROVIDER` 和 `GUID_TFCAT_DISPLAYATTRIBUTE` 类别注册
+- 后续只需解决 `StartComposition` 问题，下划线即可自动生效
 
 ## 调试经验 (Lessons Learned)
 
