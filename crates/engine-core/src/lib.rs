@@ -47,6 +47,7 @@ pub struct Modifiers {
 pub enum Action {
     Passthrough,
     Commit(String),
+    CommitRaw(String),
     UpdateCandidates,
     UpdatePreedit { text: String, cursor: usize },
     ClearPreedit,
@@ -128,14 +129,15 @@ impl EngineCore {
     fn handle_vk_key(&mut self, vk: u32) -> Action {
         match vk {
             0x0D => {
-                // Enter: commit first candidate or clear buffer
-                if self.candidates.is_empty() {
+                // Enter: commit raw pinyin text (e.g., "nihao" → "nihao")
+                let raw = self.pinyin_buffer.raw_input().to_string();
+                if raw.is_empty() {
+                    Action::Passthrough
+                } else {
                     self.pinyin_buffer.clear();
                     self.candidates.clear();
                     self.state.transition_to(state_machine::State::Idle);
-                    Action::UpdateCandidates
-                } else {
-                    self.commit_current(0, 1)
+                    Action::CommitRaw(raw)
                 }
             }
             0x08 => {

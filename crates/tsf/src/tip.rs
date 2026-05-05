@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use windows::core::{
     implement, ComObjectInterface, Error, Interface, Result as WinResult, GUID, HRESULT,
@@ -22,6 +22,17 @@ use crate::edit_session::CaretPosEditSession;
 use crate::tlog;
 
 pub(crate) static DLL_REF_COUNT: AtomicI32 = AtomicI32::new(0);
+
+/// Result of handle_shift_key — tells the caller what to do.
+enum ShiftResult {
+    /// Not a Shift key event; caller should continue normal processing.
+    NotShift,
+    /// Shift event fully handled; caller should consume and return.
+    Consumed,
+    /// Shift released with pending pinyin; caller should commit raw
+    /// pinyin (via handle_keypress VK_ENTER) then toggle mode.
+    CommitThenToggle,
+}
 
 #[implement(IClassFactory)]
 pub struct PyrustClassFactory;
@@ -79,6 +90,7 @@ pub struct PyrustTip {
     sink_cookie: RefCell<Option<u32>>,
     context_key_cookies: RefCell<Vec<u32>>,
     focus_sink_cookie: RefCell<Option<u32>>,
+    shift_pending: Cell<bool>,
 }
 
 impl PyrustTip {
@@ -95,6 +107,7 @@ impl PyrustTip {
             sink_cookie: RefCell::new(None),
             context_key_cookies: RefCell::new(Vec::new()),
             focus_sink_cookie: RefCell::new(None),
+            shift_pending: Cell::new(false),
         }
     }
 
@@ -104,6 +117,41 @@ impl PyrustTip {
             // SAFETY: dm is a valid ITfDocumentMgr COM reference.
             unsafe { dm.GetTop() }.ok()
         })
+    }
+
+    fn is_shift_key(vk: u32) -> bool {
+        matches!(vk, 0x10 | 0xA0 | 0xA1) // VK_SHIFT, VK_LSHIFT, VK_RSHIFT
+    }
+
+    /// Handle Shift key logic for mode toggle.
+    fn handle_shift_key(&self, vk: u32, is_down: bool) -> ShiftResult {
+        if !Self::is_shift_key(vk) {
+            if is_down {
+                self.shift_pending.set(false);
+            }
+            return ShiftResult::NotShift;
+        }
+        if is_down {
+            self.shift_pending.set(true);
+            ShiftResult::Consumed
+        } else {
+            if self.shift_pending.get() {
+                self.shift_pending.set(false);
+                // Check if there's pinyin to commit before toggling.
+                let has_pinyin = self.bridge.borrow().as_ref().map_or(false, |b| b.has_pinyin());
+                if has_pinyin {
+                    ShiftResult::CommitThenToggle
+                } else {
+                    if let Some(ref bridge) = *self.bridge.borrow() {
+                        let _ = bridge.req_tx().send(crate::Request::ToggleMode);
+                        tlog!("[tsf] Shift toggle: mode switched (no pinyin to commit)");
+                    }
+                    ShiftResult::Consumed
+                }
+            } else {
+                ShiftResult::Consumed
+            }
+        }
     }
 
     fn get_modifiers() -> crate::Modifiers {
@@ -121,6 +169,10 @@ impl PyrustTip {
     fn should_consume_key(&self, vk: u32) -> bool {
         if !self.is_active.load(Ordering::Acquire) {
             return false;
+        }
+        // Shift 键始终消费（用于中英切换）
+        if Self::is_shift_key(vk) {
+            return true;
         }
         if let Some(ref bridge) = *self.bridge.borrow() {
             if !bridge.is_zh_mode() {
@@ -425,6 +477,13 @@ impl ITfKeyEventSink_Impl for PyrustTip_Impl {
         _lparam: windows::Win32::Foundation::LPARAM,
     ) -> WinResult<windows::core::BOOL> {
         let vk = wparam.0 as u32;
+        match self.handle_shift_key(vk, true) {
+            ShiftResult::Consumed | ShiftResult::CommitThenToggle => {
+                tlog!("[tsf] OnTestKeyDown vk=0x{:x} shift consumed", vk);
+                return Ok(true.into());
+            }
+            ShiftResult::NotShift => {}
+        }
         let consume = self.should_consume_key(vk);
         tlog!("[tsf] OnTestKeyDown vk=0x{:x} consume={consume}", vk);
         Ok(consume.into())
@@ -437,6 +496,13 @@ impl ITfKeyEventSink_Impl for PyrustTip_Impl {
         _lparam: windows::Win32::Foundation::LPARAM,
     ) -> WinResult<windows::core::BOOL> {
         let vk = wparam.0 as u32;
+        match self.handle_shift_key(vk, true) {
+            ShiftResult::Consumed | ShiftResult::CommitThenToggle => {
+                tlog!("[tsf] OnKeyDown vk=0x{:x} shift consumed", vk);
+                return Ok(true.into());
+            }
+            ShiftResult::NotShift => {}
+        }
         tlog!("[tsf] OnKeyDown vk=0x{:x}", vk);
         if !self.is_active.load(Ordering::Acquire) {
             return Ok(false.into());
@@ -451,18 +517,39 @@ impl ITfKeyEventSink_Impl for PyrustTip_Impl {
     fn OnTestKeyUp(
         &self,
         _pic: windows::core::Ref<'_, ITfContext>,
-        _w: windows::Win32::Foundation::WPARAM,
-        _l: windows::Win32::Foundation::LPARAM,
+        wparam: windows::Win32::Foundation::WPARAM,
+        _lparam: windows::Win32::Foundation::LPARAM,
     ) -> WinResult<windows::core::BOOL> {
+        let vk = wparam.0 as u32;
+        match self.handle_shift_key(vk, false) {
+            ShiftResult::Consumed | ShiftResult::CommitThenToggle => return Ok(true.into()),
+            ShiftResult::NotShift => {}
+        }
         Ok(false.into())
     }
 
     fn OnKeyUp(
         &self,
         _pic: windows::core::Ref<'_, ITfContext>,
-        _w: windows::Win32::Foundation::WPARAM,
-        _l: windows::Win32::Foundation::LPARAM,
+        wparam: windows::Win32::Foundation::WPARAM,
+        _lparam: windows::Win32::Foundation::LPARAM,
     ) -> WinResult<windows::core::BOOL> {
+        let vk = wparam.0 as u32;
+        match self.handle_shift_key(vk, false) {
+            ShiftResult::CommitThenToggle => {
+                tlog!("[tsf] OnKeyUp vk=0x{:x} Shift commit+toggle", vk);
+                if let Some(ctx) = self.get_context() {
+                    let _ = self.handle_keypress(&ctx, 0x0D);
+                }
+                if let Some(ref bridge) = *self.bridge.borrow() {
+                    let _ = bridge.req_tx().send(crate::Request::ToggleMode);
+                    tlog!("[tsf] Shift toggle: committed pinyin + mode switched");
+                }
+                return Ok(true.into());
+            }
+            ShiftResult::Consumed => return Ok(true.into()),
+            ShiftResult::NotShift => {}
+        }
         Ok(false.into())
     }
 
@@ -482,6 +569,13 @@ impl ITfContextKeyEventSink_Impl for PyrustTip_Impl {
         _lparam: windows::Win32::Foundation::LPARAM,
     ) -> WinResult<windows::core::BOOL> {
         let vk = wparam.0 as u32;
+        match self.handle_shift_key(vk, true) {
+            ShiftResult::Consumed | ShiftResult::CommitThenToggle => {
+                tlog!("[tsf] CtxOnTestKeyDown vk=0x{:x} shift consumed", vk);
+                return Ok(true.into());
+            }
+            ShiftResult::NotShift => {}
+        }
         let consume = self.should_consume_key(vk);
         tlog!("[tsf] CtxOnTestKeyDown vk=0x{:x} consume={consume}", vk);
         Ok(consume.into())
@@ -493,6 +587,13 @@ impl ITfContextKeyEventSink_Impl for PyrustTip_Impl {
         _lparam: windows::Win32::Foundation::LPARAM,
     ) -> WinResult<windows::core::BOOL> {
         let vk = wparam.0 as u32;
+        match self.handle_shift_key(vk, true) {
+            ShiftResult::Consumed | ShiftResult::CommitThenToggle => {
+                tlog!("[tsf] CtxOnKeyDown vk=0x{:x} shift consumed", vk);
+                return Ok(true.into());
+            }
+            ShiftResult::NotShift => {}
+        }
         tlog!("[tsf] CtxOnKeyDown vk=0x{:x}", vk);
         if !self.is_active.load(Ordering::Acquire) {
             return Ok(false.into());
@@ -507,17 +608,38 @@ impl ITfContextKeyEventSink_Impl for PyrustTip_Impl {
 
     fn OnTestKeyUp(
         &self,
-        _wparam: windows::Win32::Foundation::WPARAM,
+        wparam: windows::Win32::Foundation::WPARAM,
         _lparam: windows::Win32::Foundation::LPARAM,
     ) -> WinResult<windows::core::BOOL> {
+        let vk = wparam.0 as u32;
+        match self.handle_shift_key(vk, false) {
+            ShiftResult::Consumed | ShiftResult::CommitThenToggle => return Ok(true.into()),
+            ShiftResult::NotShift => {}
+        }
         Ok(false.into())
     }
 
     fn OnKeyUp(
         &self,
-        _wparam: windows::Win32::Foundation::WPARAM,
+        wparam: windows::Win32::Foundation::WPARAM,
         _lparam: windows::Win32::Foundation::LPARAM,
     ) -> WinResult<windows::core::BOOL> {
+        let vk = wparam.0 as u32;
+        match self.handle_shift_key(vk, false) {
+            ShiftResult::CommitThenToggle => {
+                tlog!("[tsf] CtxOnKeyUp vk=0x{:x} Shift commit+toggle", vk);
+                if let Some(ctx) = self.get_context() {
+                    let _ = self.handle_keypress(&ctx, 0x0D);
+                }
+                if let Some(ref bridge) = *self.bridge.borrow() {
+                    let _ = bridge.req_tx().send(crate::Request::ToggleMode);
+                    tlog!("[tsf] Shift toggle: committed pinyin + mode switched");
+                }
+                return Ok(true.into());
+            }
+            ShiftResult::Consumed => return Ok(true.into()),
+            ShiftResult::NotShift => {}
+        }
         Ok(false.into())
     }
 }

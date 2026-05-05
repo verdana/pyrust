@@ -23,8 +23,8 @@
 
 ## 代码仓库
 - 代码仓库在项目根目录（`/home/verdana/workspace/pyrust/`）
-- Windows 构建目录：`/mnt/c/Users/Verdana/Desktop/pyrust-test/src/`
-- 修改 TSF 代码后，需手动复制到 Windows 目录：`cp crates/tsf/src/*.rs /mnt/c/Users/Verdana/Desktop/pyrust-test/src/crates/tsf/src/`
+- Windows 构建目录：`/mnt/c/Users/Verdana/Desktop/pyrust/`
+- 修改 TSF 代码后，需手动复制到 Windows 目录：`cp crates/tsf/src/*.rs /mnt/c/Users/Verdana/Desktop/pyrust/crates/tsf/src/`
 
 ## 常用命令
 ```bash
@@ -158,6 +158,22 @@ cargo build --release --target x86_64-pc-windows-gnu
   3. 缩短 n-gram 窗口（如 `"ju ju"`）
 
 **结果**：任意字母组合都能产生候选词，字数与输入音节数匹配。
+
+### Shift 中英切换 + 回车上屏（2026-05-05）— 已修复
+
+**功能 1：Shift 切换时先上屏拼音**
+- 中文模式输入 `nihao`，按 Shift → 先将 `"nihao"` 上屏，再切换到英文模式
+- 实现：`ShiftResult::CommitThenToggle` — OnKeyUp 先发 `KeyPress(VK_ENTER)` 上屏，再发 `ToggleMode`
+- `TsfBridge` 新增 `has_pinyin: Arc<AtomicBool>` 跨线程跟踪拼音缓冲区状态
+
+**功能 2：回车键将拼音原样上屏**
+- 中文模式输入 `nihao`，按回车 → `"nihao"` 作为普通文字上屏，保持中文模式
+- 实现：`Action::CommitRaw(String)` — Enter 键返回缓冲区原始内容
+
+**变更文件**：
+- `engine-core/src/lib.rs`：新增 `Action::CommitRaw`，Enter 键处理改为返回原始拼音
+- `tsf/src/tip.rs`：新增 `ShiftResult` 枚举，`handle_shift_key` 返回 `CommitThenToggle`
+- `tsf/src/bridge.rs`：新增 `has_pinyin` 原子标记，Worker 每次状态变更后更新
 
 ### 按键处理状态（2026-05-03）
 

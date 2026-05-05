@@ -159,7 +159,7 @@ HKLM\SOFTWARE\Microsoft\CTF\TIP\{CLSID}
 
 ```powershell
 # Windows 上构建（需管理员）
-cd Desktop\pyrust-test\src\crates\tsf
+cd Desktop\pyrust\src\crates\tsf
 .\..\..\..\build_tsf.bat
 
 # 查看诊断日志

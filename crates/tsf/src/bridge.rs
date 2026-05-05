@@ -34,6 +34,7 @@ static GLOBAL_UI_INIT: Once = Once::new();
 pub struct TsfBridge {
     req_tx: Sender<Request>,
     zh_mode: Arc<AtomicBool>,
+    has_pinyin: Arc<AtomicBool>,
     _worker: thread::JoinHandle<()>,
     _forwarder: thread::JoinHandle<()>,
     _config_watcher: thread::JoinHandle<()>,
@@ -98,6 +99,8 @@ impl TsfBridge {
         let initial_zh = config.general.mode == yas_config::InputMode::Zh;
         let zh_mode = Arc::new(AtomicBool::new(initial_zh));
         let worker_zh_mode = Arc::clone(&zh_mode);
+        let has_pinyin = Arc::new(AtomicBool::new(false));
+        let worker_has_pinyin = Arc::clone(&has_pinyin);
         let worker_handle = thread::Builder::new()
             .name("worker".into())
             .spawn(move || {
@@ -106,7 +109,7 @@ impl TsfBridge {
                 }));
                 match engine {
                     Ok(mut engine) => {
-                        worker_loop(&mut engine, &req_rx, &worker_ui_tx, &worker_zh_mode);
+                        worker_loop(&mut engine, &req_rx, &worker_ui_tx, &worker_zh_mode, &worker_has_pinyin);
                     }
                     Err(e) => {
                         let msg = if let Some(s) = e.downcast_ref::<String>() {
@@ -182,6 +185,7 @@ impl TsfBridge {
         Ok(Self {
             req_tx,
             zh_mode,
+            has_pinyin,
             _worker: worker_handle,
             _forwarder: forwarder_handle,
             _config_watcher: watcher_handle,
@@ -196,6 +200,10 @@ impl TsfBridge {
         self.zh_mode.load(Ordering::Relaxed)
     }
 
+    pub fn has_pinyin(&self) -> bool {
+        self.has_pinyin.load(Ordering::Relaxed)
+    }
+
     /// Graceful shutdown: signal worker to flush and exit.
     pub fn shutdown(&mut self) {
         let _ = self.req_tx.send(Request::Shutdown);
@@ -207,6 +215,7 @@ fn worker_loop(
     rx: &Receiver<Request>,
     ui_tx: &Sender<UiUpdate>,
     zh_mode: &AtomicBool,
+    has_pinyin: &AtomicBool,
 ) {
     tlog!("[tsf] worker_loop started, waiting for requests...");
     for req in rx {
@@ -241,9 +250,12 @@ fn worker_loop(
                 tlog!("[tsf] worker: handle_key action={:?}", action);
                 let update = build_ui_update(engine, caret_pos);
                 let _ = ui_tx.send(update);
+                has_pinyin.store(!engine.pinyin_buffer().is_empty(), Ordering::Relaxed);
                 let resp = match action {
                     engine_core::Action::Passthrough => Response::Passthrough,
-                    engine_core::Action::Commit(text) => Response::Committed(text),
+                    engine_core::Action::Commit(text) | engine_core::Action::CommitRaw(text) => {
+                        Response::Committed(text)
+                    }
                     _ => Response::Consumed,
                 };
                 tlog!("[tsf] worker: sending response");
@@ -251,6 +263,7 @@ fn worker_loop(
             }
             Request::SelectCandidate { index, response } => {
                 let action = engine.select_candidate(index);
+                has_pinyin.store(!engine.pinyin_buffer().is_empty(), Ordering::Relaxed);
                 let _ = ui_tx.send(build_ui_update(engine, None));
                 let resp = match action {
                     engine_core::Action::Commit(text) => Response::Committed(text),
@@ -258,7 +271,10 @@ fn worker_loop(
                 };
                 response.send(resp);
             }
-            Request::Reset => engine.reset(),
+            Request::Reset => {
+                engine.reset();
+                has_pinyin.store(false, Ordering::Relaxed);
+            }
             Request::ConfigReload => {
                 engine.update_config(Arc::new(Config::load()));
                 zh_mode.store(engine.is_zh_mode(), Ordering::Relaxed);
@@ -266,6 +282,7 @@ fn worker_loop(
             Request::ToggleMode => {
                 engine.toggle_mode();
                 zh_mode.store(engine.is_zh_mode(), Ordering::Relaxed);
+                has_pinyin.store(false, Ordering::Relaxed);
                 let _ = ui_tx.send(build_ui_update(engine, None));
             }
             Request::Shutdown => {
