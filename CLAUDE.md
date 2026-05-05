@@ -175,6 +175,23 @@ cargo build --release --target x86_64-pc-windows-gnu
 - `tsf/src/tip.rs`：新增 `ShiftResult` 枚举，`handle_shift_key` 返回 `CommitThenToggle`
 - `tsf/src/bridge.rs`：新增 `has_pinyin` 原子标记，Worker 每次状态变更后更新
 
+### 线程生命周期管理 + IPC 超时优化（2026-05-05）
+
+**问题 1：辅助线程无法退出**
+- `forwarder` 阻塞在 `action_rx` 迭代上，`config_watcher` 用 `park()` 阻塞
+- DLL 卸载时线程泄露，可能导致宿主程序崩溃
+
+**修复**：
+- `TsfBridge` 新增 `shutdown: Arc<AtomicBool>` 标志
+- `config_watcher` 改为 `sleep-loop` 检查 shutdown 标志（替代 `park()`）
+- `forwarder` 改为 `recv_timeout(500ms)` + 检查 shutdown 标志
+- `shutdown()` 设置标志后发送 `Request::Shutdown`
+
+**问题 2：oneshot 超时过长**
+- `oneshot::Receiver::recv()` 超时 5 秒，宿主 UI 线程会挂起
+
+**修复**：超时从 5s 缩短至 200ms，超时返回 `None` → `Response::Passthrough`
+
 ### 按键处理状态（2026-05-03）
 
 **已解决**：
