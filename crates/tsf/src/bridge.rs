@@ -35,6 +35,7 @@ pub struct TsfBridge {
     req_tx: Sender<Request>,
     zh_mode: Arc<AtomicBool>,
     has_pinyin: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
     _worker: thread::JoinHandle<()>,
     _forwarder: thread::JoinHandle<()>,
     _config_watcher: thread::JoinHandle<()>,
@@ -101,6 +102,7 @@ impl TsfBridge {
         let worker_zh_mode = Arc::clone(&zh_mode);
         let has_pinyin = Arc::new(AtomicBool::new(false));
         let worker_has_pinyin = Arc::clone(&has_pinyin);
+        let shutdown = Arc::new(AtomicBool::new(false));
         let worker_handle = thread::Builder::new()
             .name("worker".into())
             .spawn(move || {
@@ -127,6 +129,7 @@ impl TsfBridge {
 
         // Config watcher thread
         let watcher_req_tx = req_tx.clone();
+        let watcher_shutdown = Arc::clone(&shutdown);
         let config_path = config_path();
         let watcher_handle = thread::Builder::new()
             .name("config-watcher".into())
@@ -151,14 +154,17 @@ impl TsfBridge {
                     tlog!("[tsf] WARN: Failed to watch config: {e}");
                     return;
                 }
-                // Park thread until process exit — no CPU usage.
-                // The config watcher callback keeps the watcher alive.
-                std::thread::park();
+                // Sleep-loop checking shutdown flag — watcher callback keeps the Watcher alive.
+                while !watcher_shutdown.load(Ordering::Acquire) {
+                    thread::sleep(Duration::from_secs(1));
+                }
+                tlog!("[tsf] config-watcher: shutting down");
             })
             .context("failed to spawn config-watcher thread")?;
 
         // Action forwarder thread (reads from global action channel)
         let forwarder_req_tx = req_tx.clone();
+        let forwarder_shutdown = Arc::clone(&shutdown);
         let action_rx = GLOBAL_ACTION_RX
             .lock()
             .expect("GLOBAL_ACTION_RX poisoned")
@@ -167,18 +173,23 @@ impl TsfBridge {
         let forwarder_handle = thread::Builder::new()
             .name("action-forwarder".into())
             .spawn(move || {
-                for action in action_rx {
-                    match action {
-                        UiAction::SelectCandidate(idx) => {
-                            let (resp_tx, _) = crate::oneshot::channel();
-                            let _ = forwarder_req_tx.send(Request::SelectCandidate {
-                                index: idx,
-                                response: resp_tx,
-                            });
-                        }
-                        UiAction::NextPage | UiAction::PrevPage => {}
+                while !forwarder_shutdown.load(Ordering::Acquire) {
+                    match action_rx.recv_timeout(Duration::from_millis(500)) {
+                        Ok(action) => match action {
+                            UiAction::SelectCandidate(idx) => {
+                                let (resp_tx, _) = crate::oneshot::channel();
+                                let _ = forwarder_req_tx.send(Request::SelectCandidate {
+                                    index: idx,
+                                    response: resp_tx,
+                                });
+                            }
+                            UiAction::NextPage | UiAction::PrevPage => {}
+                        },
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                     }
                 }
+                tlog!("[tsf] action-forwarder: shutting down");
             })
             .context("failed to spawn action-forwarder thread")?;
 
@@ -186,6 +197,7 @@ impl TsfBridge {
             req_tx,
             zh_mode,
             has_pinyin,
+            shutdown,
             _worker: worker_handle,
             _forwarder: forwarder_handle,
             _config_watcher: watcher_handle,
@@ -204,8 +216,9 @@ impl TsfBridge {
         self.has_pinyin.load(Ordering::Relaxed)
     }
 
-    /// Graceful shutdown: signal worker to flush and exit.
+    /// Graceful shutdown: signal all threads to exit.
     pub fn shutdown(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
         let _ = self.req_tx.send(Request::Shutdown);
     }
 }

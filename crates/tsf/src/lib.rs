@@ -85,14 +85,14 @@ pub mod oneshot {
 
     impl<T> Receiver<T> {
         /// Receive the value. Returns `None` if the sender was dropped or
-        /// the 5-second timeout elapsed (worker thread likely crashed).
+        /// the 200ms timeout elapsed (worker thread likely stalled).
         pub fn recv(&self) -> Option<T> {
             let mut lock = self.inner.slot.lock().expect("oneshot recv: lock poisoned");
             while lock.is_none() {
                 let result = self
                     .inner
                     .condvar
-                    .wait_timeout(lock, Duration::from_secs(5))
+                    .wait_timeout(lock, Duration::from_millis(200))
                     .expect("oneshot recv: lock poisoned");
                 lock = result.0;
                 if lock.is_none() {
