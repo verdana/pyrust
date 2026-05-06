@@ -8,10 +8,10 @@ use windows::Win32::System::Com::{CoFreeUnusedLibraries, IClassFactory, IClassFa
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
 use windows::Win32::UI::TextServices::{
-    ITfCompartmentMgr, ITfComposition, ITfCompositionSink,
-    ITfCompositionSink_Impl, ITfContext, ITfContextKeyEventSink, ITfContextKeyEventSink_Impl,
+    ITfCompartmentMgr, ITfComposition,
+    ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfContextKeyEventSink, ITfContextKeyEventSink_Impl,
     ITfDisplayAttributeProvider, ITfDisplayAttributeProvider_Impl, ITfDocumentMgr, ITfEditSession,
-    ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfSource,
+    ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfRange, ITfSource,
     ITfTextInputProcessor, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
     ITfTextInputProcessor_Impl, ITfThreadFocusSink, ITfThreadFocusSink_Impl, ITfThreadMgr,
     ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
@@ -92,6 +92,8 @@ pub struct PyrustTip {
     context_key_cookies: RefCell<Vec<u32>>,
     focus_sink_cookie: RefCell<Option<u32>>,
     shift_pending: Cell<bool>,
+    /// Tracked preedit text range — fallback when StartComposition is unavailable.
+    preedit_range: Rc<RefCell<Option<ITfRange>>>,
 }
 
 impl PyrustTip {
@@ -109,6 +111,7 @@ impl PyrustTip {
             context_key_cookies: RefCell::new(Vec::new()),
             focus_sink_cookie: RefCell::new(None),
             shift_pending: Cell::new(false),
+            preedit_range: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -234,11 +237,13 @@ impl PyrustTip_Impl {
         text: String,
         flags: windows::Win32::UI::TextServices::TF_CONTEXT_EDIT_CONTEXT_FLAGS,
     ) {
-        if self.composition.borrow().is_some() {
+        let has_range = self.preedit_range.borrow().is_some();
+        if self.composition.borrow().is_some() || has_range {
             let session: ITfEditSession = CompositionEditSession::commit(
                 context.clone(),
                 text,
                 Rc::clone(&self.composition),
+                Rc::clone(&self.preedit_range),
             )
             .into();
             if let Err(e) = unsafe {
@@ -282,11 +287,7 @@ impl PyrustTip_Impl {
         use windows::Win32::UI::TextServices::{TF_ES_READWRITE, TF_ES_SYNC};
         let flags = TF_ES_READWRITE | TF_ES_SYNC;
         let comp_rc = Rc::clone(&self.composition);
-
-        // TODO: Pass actual ITfCompositionSink when lifetime issues are resolved.
-        // Currently passing None — StartComposition may fail, falling back to
-        // direct SetText (no underline, but text replacement works correctly).
-        let sink_ref: Option<ITfCompositionSink> = None;
+        let pr_rc = Rc::clone(&self.preedit_range);
 
         let result: WinResult<windows::core::BOOL> = match resp_rx.recv() {
             Some(crate::Response::ConsumedWithText(text)) => {
@@ -294,7 +295,7 @@ impl PyrustTip_Impl {
                     context.clone(),
                     text,
                     comp_rc,
-                    sink_ref,
+                    pr_rc,
                 )
                 .into();
                 if let Err(e) = unsafe {
@@ -306,8 +307,11 @@ impl PyrustTip_Impl {
             }
             Some(crate::Response::CommittedWithPreedit(text, preedit)) => {
                 self.commit_text(context, text, flags);
+                // Clear old preedit_range before starting new composition
+                *self.preedit_range.borrow_mut() = None;
+                let pr_rc2 = Rc::clone(&self.preedit_range);
                 let session: ITfEditSession =
-                    CompositionEditSession::update(context.clone(), preedit, comp_rc, sink_ref)
+                    CompositionEditSession::update(context.clone(), preedit, comp_rc, pr_rc2)
                         .into();
                 if let Err(e) = unsafe {
                     context.RequestEditSession(*self.client_id.borrow(), &session, flags)
@@ -512,6 +516,7 @@ impl ITfTextInputProcessor_Impl for PyrustTip_Impl {
         *self.focus_sink_cookie.borrow_mut() = None;
 
         *self.composition.borrow_mut() = None;
+        *self.preedit_range.borrow_mut() = None;
         *self.context_key_cookies.borrow_mut() = Vec::new();
         if let Some(mut b) = self.bridge.borrow_mut().take() {
             b.shutdown();
