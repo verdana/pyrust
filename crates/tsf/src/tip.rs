@@ -8,8 +8,8 @@ use windows::Win32::System::Com::{CoFreeUnusedLibraries, IClassFactory, IClassFa
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
 use windows::Win32::UI::TextServices::{
-    ITfCompartmentMgr, ITfComposition,
-    ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfContextKeyEventSink, ITfContextKeyEventSink_Impl,
+    ITfCompartmentMgr, ITfComposition, ITfCompositionSink,
+    ITfCompositionSink_Impl, ITfContext, ITfContextKeyEventSink, ITfContextKeyEventSink_Impl,
     ITfDisplayAttributeProvider, ITfDisplayAttributeProvider_Impl, ITfDocumentMgr, ITfEditSession,
     ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfRange, ITfSource,
     ITfTextInputProcessor, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
@@ -92,7 +92,8 @@ pub struct PyrustTip {
     context_key_cookies: RefCell<Vec<u32>>,
     focus_sink_cookie: RefCell<Option<u32>>,
     shift_pending: Cell<bool>,
-    /// Tracked preedit text range — fallback when StartComposition is unavailable.
+    /// Tracked preedit text range — used for text replacement without
+    /// requiring StartComposition to succeed.
     preedit_range: Rc<RefCell<Option<ITfRange>>>,
 }
 
@@ -224,6 +225,7 @@ impl PyrustTip {
             .ok()
             .flatten();
 
+        tlog!("[tsf] get_caret_pos: result={:?}", pos);
         pos
     }
 }
@@ -279,6 +281,7 @@ impl PyrustTip_Impl {
                     rx
                 }
                 None => {
+                    tlog!("[tsf] handle_keypress: no bridge, passing through");
                     return Ok(false.into());
                 }
             }
@@ -291,11 +294,13 @@ impl PyrustTip_Impl {
 
         let result: WinResult<windows::core::BOOL> = match resp_rx.recv() {
             Some(crate::Response::ConsumedWithText(text)) => {
+                tlog!("[tsf] handle_keypress: ConsumedWithText '{}'", text);
                 let session: ITfEditSession = CompositionEditSession::update(
                     context.clone(),
                     text,
                     comp_rc,
                     pr_rc,
+                    None,
                 )
                 .into();
                 if let Err(e) = unsafe {
@@ -306,12 +311,13 @@ impl PyrustTip_Impl {
                 Ok(true.into())
             }
             Some(crate::Response::CommittedWithPreedit(text, preedit)) => {
+                tlog!("[tsf] handle_keypress: CommittedWithPreedit '{}' + '{}'", text, preedit);
                 self.commit_text(context, text, flags);
-                // Clear old preedit_range before starting new composition
+                // Start new composition with preedit — clear old preedit_range first
                 *self.preedit_range.borrow_mut() = None;
                 let pr_rc2 = Rc::clone(&self.preedit_range);
                 let session: ITfEditSession =
-                    CompositionEditSession::update(context.clone(), preedit, comp_rc, pr_rc2)
+                    CompositionEditSession::update(context.clone(), preedit, comp_rc, pr_rc2, None)
                         .into();
                 if let Err(e) = unsafe {
                     context.RequestEditSession(*self.client_id.borrow(), &session, flags)
@@ -321,6 +327,7 @@ impl PyrustTip_Impl {
                 Ok(true.into())
             }
             Some(crate::Response::Committed(text)) => {
+                tlog!("[tsf] handle_keypress: Committed '{}'", text);
                 drop(comp_rc);
                 self.commit_text(context, text, flags);
                 Ok(true.into())
@@ -333,6 +340,7 @@ impl PyrustTip_Impl {
         if result.as_ref().map_or(false, |b| b.as_bool()) {
             let has_pinyin = self.bridge.borrow().as_ref().map_or(false, |b| b.has_pinyin());
             if !has_pinyin && self.composition.borrow().is_some() {
+                tlog!("[tsf] handle_keypress: pinyin empty, clearing stale composition");
                 self.commit_text(context, String::new(), flags);
             }
         }
@@ -574,10 +582,12 @@ impl ITfKeyEventSink_Impl for PyrustTip_Impl {
         let vk = wparam.0 as u32;
         match self.handle_shift_key(vk, true) {
             ShiftResult::Consumed | ShiftResult::CommitThenToggle => {
+                tlog!("[tsf] OnKeyDown vk=0x{:x} shift consumed", vk);
                 return Ok(true.into());
             }
             ShiftResult::NotShift => {}
         }
+        tlog!("[tsf] OnKeyDown vk=0x{:x}", vk);
         if !self.is_active.load(Ordering::Acquire) {
             return Ok(false.into());
         }
@@ -611,6 +621,7 @@ impl ITfKeyEventSink_Impl for PyrustTip_Impl {
         let vk = wparam.0 as u32;
         match self.handle_shift_key(vk, false) {
             ShiftResult::CommitThenToggle => {
+                tlog!("[tsf] OnKeyUp vk=0x{:x} Shift commit+toggle", vk);
                 if let Some(ctx) = self.get_context() {
                     let _ = self.handle_keypress(&ctx, 0x0D);
                 }
@@ -662,10 +673,12 @@ impl ITfContextKeyEventSink_Impl for PyrustTip_Impl {
         let vk = wparam.0 as u32;
         match self.handle_shift_key(vk, true) {
             ShiftResult::Consumed | ShiftResult::CommitThenToggle => {
+                tlog!("[tsf] CtxOnKeyDown vk=0x{:x} shift consumed", vk);
                 return Ok(true.into());
             }
             ShiftResult::NotShift => {}
         }
+        tlog!("[tsf] CtxOnKeyDown vk=0x{:x}", vk);
         if !self.is_active.load(Ordering::Acquire) {
             return Ok(false.into());
         }
@@ -698,6 +711,7 @@ impl ITfContextKeyEventSink_Impl for PyrustTip_Impl {
         let vk = wparam.0 as u32;
         match self.handle_shift_key(vk, false) {
             ShiftResult::CommitThenToggle => {
+                tlog!("[tsf] CtxOnKeyUp vk=0x{:x} Shift commit+toggle", vk);
                 if let Some(ctx) = self.get_context() {
                     let _ = self.handle_keypress(&ctx, 0x0D);
                 }

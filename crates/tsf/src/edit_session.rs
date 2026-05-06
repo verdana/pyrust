@@ -2,11 +2,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Mutex;
 
-use windows::core::{implement, Result as WinResult};
+use windows::core::{implement, Interface, Result as WinResult};
 use windows::Win32::Foundation::RECT;
 use windows::Win32::UI::TextServices::{
-    ITfComposition, ITfContext, ITfEditSession, ITfEditSession_Impl,
-    ITfRange, TF_SELECTION,
+    ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition, ITfEditSession,
+    ITfEditSession_Impl, ITfRange, TF_SELECTION,
 };
 
 #[allow(unused_imports)]
@@ -81,20 +81,19 @@ impl ITfEditSession_Impl for CommitEditSession_Impl {
 
 /// Edit session that manages TSF composition (underlined preedit text).
 ///
-/// **Primary path**: When composition exists (`ITfComposition` from `StartComposition`),
-/// uses `composition.GetRange()` → `SetText` (Weasel pattern, no `ShiftStart` needed).
-///
-/// **Fallback path**: When no composition (StartComposition failed), uses stored
-/// `preedit_range` with `ShiftStart` to expand range after `SetText` collapse.
-/// This was the original mechanism that worked in Notepad/Word.
+/// When `end_composition` is false: starts a new composition or updates the
+/// existing one with new preedit text (e.g., "ni" → "nihao").
+/// When `end_composition` is true: replaces composition text with final
+/// committed text and ends the composition.
 #[implement(ITfEditSession)]
 pub struct CompositionEditSession {
     context: ITfContext,
     text: String,
     end_composition: bool,
     composition: Rc<RefCell<Option<ITfComposition>>>,
-    /// Tracked preedit text range — used as fallback when composition is unavailable.
+    /// Tracked preedit text range for replacement without requiring StartComposition.
     preedit_range: Rc<RefCell<Option<ITfRange>>>,
+    sink: Option<ITfCompositionSink>,
 }
 
 impl CompositionEditSession {
@@ -103,6 +102,7 @@ impl CompositionEditSession {
         text: String,
         composition: Rc<RefCell<Option<ITfComposition>>>,
         preedit_range: Rc<RefCell<Option<ITfRange>>>,
+        sink: Option<ITfCompositionSink>,
     ) -> Self {
         Self {
             context,
@@ -110,6 +110,7 @@ impl CompositionEditSession {
             end_composition: false,
             composition,
             preedit_range,
+            sink,
         }
     }
 
@@ -125,150 +126,130 @@ impl CompositionEditSession {
             end_composition: true,
             composition,
             preedit_range,
+            sink: None,
         }
     }
 }
 
 impl ITfEditSession_Impl for CompositionEditSession_Impl {
     fn DoEditSession(&self, ec: u32) -> WinResult<()> {
+        tlog!("[tsf] CompositionEditSession: BEGIN text='{}' end_comp={} has_range={}", self.text, self.end_composition, self.preedit_range.borrow().is_some());
         let text_wide: Vec<u16> = self.text.encode_utf16().collect();
 
-        // === PATH A: Composition exists (StartComposition succeeded earlier) ===
-        // Use composition.GetRange() + SetText — no ShiftStart needed.
-        if let Some(ref comp) = *self.composition.borrow() {
-            if let Ok(range) = unsafe { comp.GetRange() } {
-                tlog!("[tsf] CompositionEditSession: using composition range");
-
-                if let Err(e) = unsafe { range.SetText(ec, 0, &text_wide) } {
-                    tlog!("[tsf] CompositionEditSession: SetText FAILED: {:?}", e);
-                    return Err(e);
-                }
-
-                if !self.end_composition && !text_wide.is_empty() {
-                    // Move cursor to end of preedit text
-                    if let Ok(cursor_range) = unsafe { range.Clone() } {
-                        use windows::Win32::UI::TextServices::TfAnchor;
-                        let _ = unsafe { cursor_range.Collapse(ec, TfAnchor(1)) };
-                        let new_sel = TF_SELECTION {
-                            range: std::mem::ManuallyDrop::new(Some(cursor_range)),
-                            style: windows::Win32::UI::TextServices::TF_SELECTIONSTYLE {
-                                ase: windows::Win32::UI::TextServices::TF_AE_END,
-                                fInterimChar: false.into(),
-                            },
-                        };
-                        let _ = unsafe { self.context.SetSelection(ec, &[new_sel]) };
-                    }
-                }
-
-                if self.end_composition {
-                    let _ = unsafe { comp.EndComposition(ec) };
-                    *self.composition.borrow_mut() = None;
-                    *self.preedit_range.borrow_mut() = None;
-                }
-
-                return Ok(());
-            }
-        }
-
-        // === PATH B: No composition — fallback to preedit_range + ShiftStart ===
-        tlog!("[tsf] CompositionEditSession: fallback path (no composition)");
-
-        // Get the range to operate on: stored preedit_range, or fresh from selection
+        // 1. Determine the range to operate on.
+        // Priority: stored preedit_range > composition.GetRange() > new from selection
         let mut current_range = if let Some(ref r) = *self.preedit_range.borrow() {
+            tlog!("[tsf] CompositionEditSession: using stored preedit range");
             Some(r.clone())
-        } else {
-            let mut sel = [TF_SELECTION::default()];
-            let mut fetched: u32 = 0;
-            if unsafe { self.context.GetSelection(ec, 0, &mut sel, &mut fetched) }.is_ok()
-                && fetched > 0
-            {
-                (*sel[0].range).clone()
-            } else {
-                None
+        } else if let Some(ref comp) = *self.composition.borrow() {
+            match unsafe { comp.GetRange() } {
+                Ok(range) => {
+                    tlog!("[tsf] CompositionEditSession: using composition range");
+                    Some(range)
+                }
+                Err(e) => {
+                    tlog!("[tsf] CompositionEditSession: comp.GetRange failed: {:?}", e);
+                    None
+                }
             }
+        } else {
+            None
         };
 
-        if let Some(ref range) = current_range {
-            if self.end_composition || text_wide.is_empty() {
-                // Commit: set final text (may be empty to clear)
+        // 2. If no range yet and updating, create one from the selection.
+        if current_range.is_none() && !self.end_composition {
+            let mut sel = [TF_SELECTION::default()];
+            let mut fetched: u32 = 0;
+            if let Err(e) = unsafe { self.context.GetSelection(ec, 0, &mut sel, &mut fetched) } {
+                tlog!("[tsf] CompositionEditSession: GetSelection FAILED: {:?}", e);
+                return Err(e);
+            }
+            tlog!("[tsf] CompositionEditSession: GetSelection fetched={} has_range={}", fetched, sel[0].range.is_some());
+
+            if fetched > 0 && sel[0].range.is_some() {
+                let range = sel[0].range.as_ref().unwrap();
+                use windows::Win32::UI::TextServices::TfAnchor;
+                let _ = unsafe { range.Collapse(ec, TfAnchor(0)) };
+
+                // Insert text, then expand range backward to cover it.
+                tlog!("[tsf] CompositionEditSession: initial SetText '{}'", self.text);
                 if let Err(e) = unsafe { range.SetText(ec, 0, &text_wide) } {
                     tlog!("[tsf] CompositionEditSession: SetText FAILED: {:?}", e);
                     return Err(e);
                 }
+                let _ = unsafe { range.ShiftStart(ec, -(text_wide.len() as i32), std::ptr::null_mut(), std::ptr::null()) };
+
+                // StartComposition is attempted here; failure is logged but not fatal
+                // since text is already visible via SetText + preedit_range tracking.
+                if let Ok(ctx_comp) = self.context.cast::<ITfContextComposition>() {
+                    match unsafe { ctx_comp.StartComposition(ec, range, self.sink.as_ref()) } {
+                        Ok(comp) => {
+                            tlog!("[tsf] CompositionEditSession: StartComposition SUCCESS");
+                            *self.composition.borrow_mut() = Some(comp.clone());
+                        }
+                        Err(e) => {
+                            tlog!("[tsf] CompositionEditSession: StartComposition FAILED: {:?}", e);
+                        }
+                    }
+                }
+
+                current_range = Some(range.clone());
+                // Store range for next keystroke so we can REPLACE instead of re-insert.
+                *self.preedit_range.borrow_mut() = Some(range.clone());
             } else {
-                // Update preedit: SetText replaces range content, then ShiftStart re-expands
-                if let Err(e) = unsafe { range.SetText(ec, 0, &text_wide) } {
-                    tlog!("[tsf] CompositionEditSession: SetText FAILED: {:?}", e);
-                    return Err(e);
-                }
-
-                // SetText collapses the range to end (0 length). Re-expand to cover the text.
-                if !text_wide.is_empty() {
-                    let shift_result = unsafe {
-                        range.ShiftStart(
-                            ec,
-                            -(text_wide.len() as i32),
-                            std::ptr::null_mut(),
-                            std::ptr::null(),
-                        )
-                    };
-                    if shift_result.is_err() {
-                        tlog!("[tsf] CompositionEditSession: ShiftStart FAILED — trying fresh range");
-                        // If ShiftStart fails, try getting a fresh range from selection
-                        let mut sel = [TF_SELECTION::default()];
-                        let mut fetched: u32 = 0;
-                        if unsafe { self.context.GetSelection(ec, 0, &mut sel, &mut fetched) }
-                            .is_ok()
-                            && fetched > 0
-                        {
-                            if let Some(ref fresh_range) = *sel[0].range {
-                                // The selection should be at end of text we just inserted.
-                                // Try to expand backward from there.
-                                let _ = unsafe {
-                                    fresh_range.ShiftStart(
-                                        ec,
-                                        -(text_wide.len() as i32),
-                                        std::ptr::null_mut(),
-                                        std::ptr::null(),
-                                    )
-                                };
-                                current_range = Some(fresh_range.clone());
-                            }
-                        }
+                // Fallback: try GetStart.
+                tlog!("[tsf] CompositionEditSession: no selection, fallback GetStart");
+                if let Ok(start_range) = unsafe { self.context.GetStart(ec) } {
+                    if let Err(e) = unsafe { start_range.SetText(ec, 0, &text_wide) } {
+                        tlog!("[tsf] CompositionEditSession: fallback SetText FAILED: {:?}", e);
+                        return Err(e);
                     }
-                }
-
-                // Store range for next keystroke
-                if let Some(ref r) = current_range {
-                    *self.preedit_range.borrow_mut() = Some(r.clone());
-                }
-
-                // Move cursor to end of preedit text
-                if let Some(ref range) = current_range {
-                    if let Ok(cursor_range) = unsafe { range.Clone() } {
-                        use windows::Win32::UI::TextServices::TfAnchor;
-                        let _ = unsafe { cursor_range.Collapse(ec, TfAnchor(1)) };
-                        let new_sel = TF_SELECTION {
-                            range: std::mem::ManuallyDrop::new(Some(cursor_range)),
-                            style: windows::Win32::UI::TextServices::TF_SELECTIONSTYLE {
-                                ase: windows::Win32::UI::TextServices::TF_AE_END,
-                                fInterimChar: false.into(),
-                            },
-                        };
-                        if let Err(e) = unsafe { self.context.SetSelection(ec, &[new_sel]) } {
-                            tlog!("[tsf] CompositionEditSession: SetSelection FAILED: {:?}", e);
-                        }
-                    }
+                    let _ = unsafe { start_range.ShiftStart(ec, -(text_wide.len() as i32), std::ptr::null_mut(), std::ptr::null()) };
+                    current_range = Some(start_range.clone());
+                    *self.preedit_range.borrow_mut() = Some(start_range);
                 }
             }
         }
 
-        // End composition cleanup
+        // 3. Replace/update text on the range.
+        if let Some(ref range) = current_range {
+            tlog!("[tsf] CompositionEditSession: SetText '{}' on range", self.text);
+            if let Err(e) = unsafe { range.SetText(ec, 0, &text_wide) } {
+                tlog!("[tsf] CompositionEditSession: SetText FAILED: {:?}", e);
+                return Err(e);
+            }
+
+            // Store/update the range for next keystroke (covers new text span).
+            if !self.end_composition {
+                *self.preedit_range.borrow_mut() = Some(range.clone());
+            }
+
+            // 4. Move cursor to end.
+            if let Ok(cursor_range) = unsafe { range.Clone() } {
+                use windows::Win32::UI::TextServices::TfAnchor;
+                let _ = unsafe { cursor_range.Collapse(ec, TfAnchor(1)) };
+                let new_sel = TF_SELECTION {
+                    range: std::mem::ManuallyDrop::new(Some(cursor_range)),
+                    style: windows::Win32::UI::TextServices::TF_SELECTIONSTYLE {
+                        ase: windows::Win32::UI::TextServices::TF_AE_END,
+                        fInterimChar: false.into(),
+                    },
+                };
+                if let Err(e) = unsafe { self.context.SetSelection(ec, &[new_sel]) } {
+                    tlog!("[tsf] CompositionEditSession: SetSelection FAILED: {:?}", e);
+                }
+            }
+        } else {
+            tlog!("[tsf] CompositionEditSession: SKIPPING — no range, text NOT inserted");
+        }
+
+        // 5. Handle completion — clear all state.
         if self.end_composition {
             *self.composition.borrow_mut() = None;
             *self.preedit_range.borrow_mut() = None;
         }
 
+        tlog!("[tsf] CompositionEditSession: END");
         Ok(())
     }
 }
