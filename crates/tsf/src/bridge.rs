@@ -230,7 +230,6 @@ fn worker_loop(
     zh_mode: &AtomicBool,
     has_pinyin: &AtomicBool,
 ) {
-    tlog!("[tsf] worker_loop started, waiting for requests...");
     for req in rx {
         match req {
             Request::KeyPress {
@@ -239,7 +238,6 @@ fn worker_loop(
                 caret_pos,
                 response,
             } => {
-                tlog!("[tsf] worker: KeyPress vk=0x{vk:x}");
                 let key = KeyEvent {
                     vk,
                     ch: char_from_vk(vk, modifiers),
@@ -260,7 +258,6 @@ fn worker_loop(
                         continue;
                     }
                 };
-                tlog!("[tsf] worker: handle_key action={:?}", action);
                 let update = build_ui_update(engine, caret_pos);
                 let _ = ui_tx.send(update);
                 has_pinyin.store(!engine.pinyin_buffer().is_empty(), Ordering::Relaxed);
@@ -278,7 +275,6 @@ fn worker_loop(
                     engine_core::Action::ClearPreedit => Response::Consumed,
                     _ => Response::Consumed,
                 };
-                tlog!("[tsf] worker: sending response");
                 response.send(resp);
             }
             Request::SelectCandidate { index, response } => {

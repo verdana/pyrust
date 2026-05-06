@@ -17,14 +17,54 @@ if (-not $isAdmin) {
     Write-Host "WARNING: Not running as Administrator. DLL registration will be skipped." -ForegroundColor Yellow
 }
 
+# Function: Find and kill processes locking a DLL using PowerShell's openfiles or WMI
+function Stop-DllLockers {
+    param([string]$DllPath)
+
+    if (-not (Test-Path $DllPath)) { return }
+
+    $fullPath = (Resolve-Path $DllPath).Path
+    Write-Host "      Checking locks on: $fullPath" -ForegroundColor Gray
+
+    # Try using handle.exe if available (Sysinternals)
+    if (Get-Command handle.exe -ErrorAction SilentlyContinue) {
+        $output = & handle.exe -accepteula $fullPath 2>$null
+        foreach ($line in $output) {
+            if ($line -match '^\s*(\S+)\s+pid:\s*(\d+)') {
+                $procName = $Matches[1]
+                $pid = [int]$Matches[2]
+                Write-Host "      Killing: $procName (PID: $pid)" -ForegroundColor Yellow
+                Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
 # Phase 1: Kill processes that lock TSF DLLs
 Write-Host "[1/3] Killing text-input processes..." -ForegroundColor Cyan
-$procs = @("notepad.exe", "TextInputHost.exe", "ctfmon.exe", "ApplicationFrameHost.exe")
+
+# Standard IME-related processes
+$procs = @("notepad", "TextInputHost", "ctfmon", "ApplicationFrameHost", "SearchHost", "ShellExperienceHost")
 foreach ($p in $procs) {
-    Stop-Process -Name ($p -replace '\.exe$','') -Force -ErrorAction SilentlyContinue
+    Stop-Process -Name $p -Force -ErrorAction SilentlyContinue
 }
+
+# Also try to find and kill any process locking our specific DLLs
+$dllPaths = @(
+    ".\target\release\tsf.dll"
+    ".\target\release\deps\tsf.dll"
+)
+foreach ($dll in $dllPaths) {
+    Stop-DllLockers -DllPath $dll
+}
+
 Write-Host "      Waiting for file handles to release..." -ForegroundColor Gray
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 2
+
+# Second pass: try again after wait
+foreach ($dll in $dllPaths) {
+    Stop-DllLockers -DllPath $dll
+}
 
 # Clean old build artifacts
 $dll = "target\release\tsf.dll"
