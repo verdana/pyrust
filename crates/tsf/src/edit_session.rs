@@ -4,12 +4,9 @@ use std::sync::Mutex;
 
 use windows::core::{implement, Interface, Result as WinResult};
 use windows::Win32::Foundation::RECT;
-use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
-use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::TextServices::{
-    CLSID_TF_CategoryMgr, GUID_PROP_ATTRIBUTE, GUID_PROP_COMPOSING, ITfCategoryMgr, ITfComposition,
-    ITfCompositionSink, ITfContext, ITfContextComposition, ITfEditSession, ITfEditSession_Impl,
-    ITfRange, TF_SELECTION,
+    GUID_PROP_ATTRIBUTE, ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition,
+    ITfEditSession, ITfEditSession_Impl, TF_SELECTION,
 };
 
 #[allow(unused_imports)]
@@ -84,6 +81,9 @@ impl ITfEditSession_Impl for CommitEditSession_Impl {
 
 /// Edit session that manages TSF composition (underlined preedit text).
 ///
+/// Uses the Weasel/libIME2 pattern: `StartComposition` → `composition.GetRange()`
+/// → `SetText` for text updates. No manual range tracking or `ShiftStart` needed.
+///
 /// When `end_composition` is false: starts a new composition or updates the
 /// existing one with new preedit text (e.g., "ni" → "nihao").
 /// When `end_composition` is true: replaces composition text with final
@@ -94,82 +94,14 @@ pub struct CompositionEditSession {
     text: String,
     end_composition: bool,
     composition: Rc<RefCell<Option<ITfComposition>>>,
-    /// Tracked preedit text range for replacement without requiring StartComposition.
-    preedit_range: Rc<RefCell<Option<ITfRange>>>,
     sink: Option<ITfCompositionSink>,
 }
 
 impl CompositionEditSession {
-    /// Apply display attribute (underline) to the preedit range.
-    /// Sets both GUID_PROP_COMPOSING (BOOL) and GUID_PROP_ATTRIBUTE (display style).
-    fn apply_display_attribute(ec: u32, context: &ITfContext, range: &ITfRange) {
-        // SAFETY: All COM calls are valid within an edit session.
-        unsafe {
-            // 1. Set GUID_PROP_COMPOSING = TRUE (signals that text is in composition mode)
-            // Many apps (like Notepad) rely on this property to render composition styling.
-            if let Ok(prop) = context.GetProperty(&GUID_PROP_COMPOSING) {
-                // Use raw pointer to avoid ManuallyDrop issues
-                let mut var: VARIANT = std::mem::zeroed();
-                let var_ptr = &mut var as *mut VARIANT as *mut u8;
-                // vt is at offset 0
-                *(var_ptr as *mut windows::Win32::System::Variant::VARENUM) = windows::Win32::System::Variant::VT_BOOL;
-                // boolVal is in the Anonymous union, at offset 8
-                let bool_ptr = var_ptr.add(8) as *mut windows::Win32::Foundation::VARIANT_BOOL;
-                *bool_ptr = windows::Win32::Foundation::VARIANT_BOOL(-1);
-
-                if let Err(e) = prop.SetValue(ec, range, &var) {
-                    tlog!("[tsf] apply_display_attribute: GUID_PROP_COMPOSING SetValue failed: {:?}", e);
-                } else {
-                    tlog!("[tsf] apply_display_attribute: GUID_PROP_COMPOSING = TRUE");
-                }
-            }
-
-            // 2. Get the display attribute property and set our custom attribute.
-            let prop = match context.GetProperty(&GUID_PROP_ATTRIBUTE) {
-                Ok(p) => p,
-                Err(e) => {
-                    tlog!("[tsf] apply_display_attribute: GetProperty failed: {:?}", e);
-                    return;
-                }
-            };
-
-            // 3. Get TfGuidAtom for our display attribute GUID.
-            let cat_mgr: ITfCategoryMgr = match CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER) {
-                Ok(m) => m,
-                Err(e) => {
-                    tlog!("[tsf] apply_display_attribute: CoCreateInstance(CategoryMgr) failed: {:?}", e);
-                    return;
-                }
-            };
-
-            let atom = match cat_mgr.RegisterGUID(&crate::display_attrs::GUID_ATTR_INPUT) {
-                Ok(a) => a,
-                Err(e) => {
-                    tlog!("[tsf] apply_display_attribute: RegisterGUID failed: {:?}", e);
-                    return;
-                }
-            };
-
-            // 4. Set the property value (TfGuidAtom is VT_I4).
-            let mut var: VARIANT = std::mem::zeroed();
-            let var_ptr = &mut var as *mut VARIANT as *mut u8;
-            *(var_ptr as *mut windows::Win32::System::Variant::VARENUM) = windows::Win32::System::Variant::VT_I4;
-            let lval_ptr = var_ptr.add(8) as *mut i32;
-            *lval_ptr = atom as i32;
-
-            if let Err(e) = prop.SetValue(ec, range, &var) {
-                tlog!("[tsf] apply_display_attribute: GUID_PROP_ATTRIBUTE SetValue failed: {:?}", e);
-            } else {
-                tlog!("[tsf] apply_display_attribute: OK atom={}", atom);
-            }
-        }
-    }
-
     pub fn update(
         context: ITfContext,
         text: String,
         composition: Rc<RefCell<Option<ITfComposition>>>,
-        preedit_range: Rc<RefCell<Option<ITfRange>>>,
         sink: Option<ITfCompositionSink>,
     ) -> Self {
         Self {
@@ -177,7 +109,6 @@ impl CompositionEditSession {
             text,
             end_composition: false,
             composition,
-            preedit_range,
             sink,
         }
     }
@@ -186,14 +117,12 @@ impl CompositionEditSession {
         context: ITfContext,
         text: String,
         composition: Rc<RefCell<Option<ITfComposition>>>,
-        preedit_range: Rc<RefCell<Option<ITfRange>>>,
     ) -> Self {
         Self {
             context,
             text,
             end_composition: true,
             composition,
-            preedit_range,
             sink: None,
         }
     }
@@ -203,24 +132,10 @@ impl ITfEditSession_Impl for CompositionEditSession_Impl {
     fn DoEditSession(&self, ec: u32) -> WinResult<()> {
         let text_wide: Vec<u16> = self.text.encode_utf16().collect();
 
-        // 1. Determine the range to operate on.
-        // Priority: stored preedit_range > composition.GetRange() > new from selection
-        let mut current_range = if let Some(ref r) = *self.preedit_range.borrow() {
-            Some(r.clone())
-        } else if let Some(ref comp) = *self.composition.borrow() {
-            match unsafe { comp.GetRange() } {
-                Ok(range) => Some(range),
-                Err(e) => {
-                    tlog!("[tsf] CompositionEditSession: comp.GetRange failed: {:?}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // 2. If no range yet and updating, create one from the selection.
-        if current_range.is_none() && !self.end_composition {
+        // 1. Ensure composition exists for update operations.
+        // Follow Weasel pattern: StartComposition FIRST, then SetText.
+        if !self.end_composition && self.composition.borrow().is_none() {
+            // Get current insertion point
             let mut sel = [TF_SELECTION::default()];
             let mut fetched: u32 = 0;
             if let Err(e) = unsafe { self.context.GetSelection(ec, 0, &mut sel, &mut fetched) } {
@@ -231,108 +146,91 @@ impl ITfEditSession_Impl for CompositionEditSession_Impl {
             if fetched > 0 && sel[0].range.is_some() {
                 let range = sel[0].range.as_ref().unwrap();
                 use windows::Win32::UI::TextServices::TfAnchor;
-
-                // Insert text at cursor position
                 let _ = unsafe { range.Collapse(ec, TfAnchor(0)) };
+
+                // Try StartComposition on the empty insertion point range
+                if let Ok(ctx_comp) = self.context.cast::<ITfContextComposition>() {
+                    match unsafe { ctx_comp.StartComposition(ec, range, self.sink.as_ref()) } {
+                        Ok(comp) => {
+                            tlog!("[tsf] CompositionEditSession: StartComposition SUCCESS");
+                            *self.composition.borrow_mut() = Some(comp);
+                        }
+                        Err(e) => {
+                            tlog!("[tsf] CompositionEditSession: StartComposition FAILED: {:?}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Get the range to operate on.
+        let current_range = if let Some(ref comp) = *self.composition.borrow() {
+            // Use composition-managed range (Weasel pattern)
+            match unsafe { comp.GetRange() } {
+                Ok(range) => Some(range),
+                Err(e) => {
+                    tlog!("[tsf] CompositionEditSession: comp.GetRange failed: {:?}", e);
+                    None
+                }
+            }
+        } else {
+            // Fallback: get range from current selection (no composition mode)
+            let mut sel = [TF_SELECTION::default()];
+            let mut fetched: u32 = 0;
+            if unsafe { self.context.GetSelection(ec, 0, &mut sel, &mut fetched) }.is_ok()
+                && fetched > 0
+            {
+                (*sel[0].range).clone()
+            } else {
+                None
+            }
+        };
+
+        // 3. Set text on the range.
+        if let Some(ref range) = current_range {
+            if self.end_composition || text_wide.is_empty() {
+                // Commit: set final text (may be empty to clear)
                 if let Err(e) = unsafe { range.SetText(ec, 0, &text_wide) } {
                     tlog!("[tsf] CompositionEditSession: SetText FAILED: {:?}", e);
                     return Err(e);
                 }
-                let _ = unsafe { range.ShiftStart(ec, -(text_wide.len() as i32), std::ptr::null_mut(), std::ptr::null()) };
-
-                // Now try StartComposition with the text range
-                let mut composition_created = false;
-                if let Ok(ctx_comp) = self.context.cast::<ITfContextComposition>() {
-                    match unsafe { ctx_comp.StartComposition(ec, range, None) } {
-                        Ok(comp) => {
-                            tlog!("[tsf] CompositionEditSession: StartComposition SUCCESS");
-                            *self.composition.borrow_mut() = Some(comp.clone());
-                            composition_created = true;
-                        }
-                        Err(e) => {
-                            tlog!("[tsf] CompositionEditSession: StartComposition FAILED: {:?}", e);
-                            // Try with a cloned range as fallback
-                            if let Ok(cloned) = unsafe { range.Clone() } {
-                                match unsafe { ctx_comp.StartComposition(ec, &cloned, None) } {
-                                    Ok(comp) => {
-                                        tlog!("[tsf] CompositionEditSession: StartComposition SUCCESS (cloned)");
-                                        *self.composition.borrow_mut() = Some(comp.clone());
-                                        composition_created = true;
-                                    }
-                                    Err(e2) => {
-                                        tlog!("[tsf] CompositionEditSession: StartComposition FAILED (cloned): {:?}", e2);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                current_range = Some(range.clone());
-                *self.preedit_range.borrow_mut() = Some(range.clone());
-
-                if !composition_created && !text_wide.is_empty() {
-                    CompositionEditSession::apply_display_attribute(ec, &self.context, range);
-                }
             } else {
-                // Fallback: try GetStart.
-                if let Ok(start_range) = unsafe { self.context.GetStart(ec) } {
-                    if let Err(e) = unsafe { start_range.SetText(ec, 0, &text_wide) } {
-                        tlog!("[tsf] CompositionEditSession: fallback SetText FAILED: {:?}", e);
-                        return Err(e);
+                // Update preedit: replace composition content
+                if let Err(e) = unsafe { range.SetText(ec, 0, &text_wide) } {
+                    tlog!("[tsf] CompositionEditSession: SetText FAILED: {:?}", e);
+                    return Err(e);
+                }
+
+                // Move cursor to end of preedit text
+                if let Ok(cursor_range) = unsafe { range.Clone() } {
+                    use windows::Win32::UI::TextServices::TfAnchor;
+                    let _ = unsafe { cursor_range.Collapse(ec, TfAnchor(1)) };
+                    let new_sel = TF_SELECTION {
+                        range: std::mem::ManuallyDrop::new(Some(cursor_range)),
+                        style: windows::Win32::UI::TextServices::TF_SELECTIONSTYLE {
+                            ase: windows::Win32::UI::TextServices::TF_AE_END,
+                            fInterimChar: false.into(),
+                        },
+                    };
+                    if let Err(e) = unsafe { self.context.SetSelection(ec, &[new_sel]) } {
+                        tlog!("[tsf] CompositionEditSession: SetSelection FAILED: {:?}", e);
                     }
-                    let _ = unsafe { start_range.ShiftStart(ec, -(text_wide.len() as i32), std::ptr::null_mut(), std::ptr::null()) };
-                    current_range = Some(start_range.clone());
-                    *self.preedit_range.borrow_mut() = Some(start_range);
                 }
             }
         }
 
-        // 3. Replace/update text on the range.
-        if let Some(ref range) = current_range {
-            if let Err(e) = unsafe { range.SetText(ec, 0, &text_wide) } {
-                tlog!("[tsf] CompositionEditSession: SetText FAILED: {:?}", e);
-                return Err(e);
-            }
-
-            // SetText collapses the range to end (0 length). Re-expand to cover the text.
-            if !text_wide.is_empty() {
-                let _ = unsafe { range.ShiftStart(ec, -(text_wide.len() as i32), std::ptr::null_mut(), std::ptr::null()) };
-            }
-
-            // Store/update the range for next keystroke (covers new text span).
-            if !self.end_composition {
-                *self.preedit_range.borrow_mut() = Some(range.clone());
-            }
-
-            // 4. Apply display attribute (underline) to the range.
-            // If composition exists (StartComposition succeeded), TSF manages attributes automatically.
-            if !self.end_composition && !text_wide.is_empty() && self.composition.borrow().is_none() {
-                CompositionEditSession::apply_display_attribute(ec, &self.context, range);
-            }
-
-            // 5. Move cursor to end.
-            if let Ok(cursor_range) = unsafe { range.Clone() } {
-                use windows::Win32::UI::TextServices::TfAnchor;
-                let _ = unsafe { cursor_range.Collapse(ec, TfAnchor(1)) };
-                let new_sel = TF_SELECTION {
-                    range: std::mem::ManuallyDrop::new(Some(cursor_range)),
-                    style: windows::Win32::UI::TextServices::TF_SELECTIONSTYLE {
-                        ase: windows::Win32::UI::TextServices::TF_AE_END,
-                        fInterimChar: false.into(),
-                    },
-                };
-                if let Err(e) = unsafe { self.context.SetSelection(ec, &[new_sel]) } {
-                    tlog!("[tsf] CompositionEditSession: SetSelection FAILED: {:?}", e);
-                }
-            }
-        } else {
-        }
-
-        // 5. Handle completion — clear all state.
+        // 4. End composition if requested.
         if self.end_composition {
+            if let Some(ref comp) = *self.composition.borrow() {
+                // Clear display attributes before ending
+                if let Some(ref range) = current_range {
+                    if let Ok(prop) = unsafe { self.context.GetProperty(&GUID_PROP_ATTRIBUTE) } {
+                        let _ = unsafe { prop.Clear(ec, range) };
+                    }
+                }
+                let _ = unsafe { comp.EndComposition(ec) };
+            }
             *self.composition.borrow_mut() = None;
-            *self.preedit_range.borrow_mut() = None;
         }
 
         Ok(())
