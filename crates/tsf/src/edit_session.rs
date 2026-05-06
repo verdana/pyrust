@@ -140,11 +140,10 @@ impl ITfEditSession_Impl for CompositionEditSession_Impl {
         let text_wide: Vec<u16> = self.text.encode_utf16().collect();
 
         // 1. Determine the range to operate on.
-        // Priority: stored preedit_range > composition.GetRange() > new from selection
-        let mut current_range = if let Some(ref r) = *self.preedit_range.borrow() {
-            tlog!("[tsf] CompositionEditSession: using stored preedit range");
-            Some(r.clone())
-        } else if let Some(ref comp) = *self.composition.borrow() {
+        // Priority: composition.GetRange() > stored preedit_range > new from selection
+        // When composition exists (StartComposition succeeded), ALWAYS use its range.
+        // Using preedit_range with an active composition causes conflicts/crashes.
+        let mut current_range = if let Some(ref comp) = *self.composition.borrow() {
             match unsafe { comp.GetRange() } {
                 Ok(range) => {
                     tlog!("[tsf] CompositionEditSession: using composition range");
@@ -155,6 +154,9 @@ impl ITfEditSession_Impl for CompositionEditSession_Impl {
                     None
                 }
             }
+        } else if let Some(ref r) = *self.preedit_range.borrow() {
+            tlog!("[tsf] CompositionEditSession: using stored preedit range");
+            Some(r.clone())
         } else {
             None
         };
