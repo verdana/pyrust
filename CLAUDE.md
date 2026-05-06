@@ -34,17 +34,26 @@
 - Windows 目录仅用于编译测试，不是代码源
 
 ## 常用命令
+
+**重要：所有 cargo 命令必须加 `--target x86_64-pc-windows-gnu`**
+
+`windows-core 0.62` 的 `imp` 模块（`IMarshal`、`marshaler`）仅在 `#[cfg(windows)]` 下编译。
+在 Linux/WSL 上不指定 target 会导致 `windows-future` 编译失败（`cannot find type IMarshal`）。
+
 ```bash
-# 检查代码 (Linux)
-cargo check
-# 运行单元测试
-cargo test
-# 构建全平台 (通过 feature 切换)
-cargo build --release
-# 构建词库
+# 检查代码
+cargo check --target x86_64-pc-windows-gnu
+# 运行单元测试（注意：交叉编译的二进制无法在 Linux 上正常运行 SQLite 测试）
+cargo test --target x86_64-pc-windows-gnu
+# 原生 Linux 测试（仅限非 Windows 依赖的纯逻辑测试）
+cargo test -p dict --lib
+cargo test -p engine-core
+# 构建
+cargo build --release --target x86_64-pc-windows-gnu
+# 构建词库（dict-compiler 不依赖 windows crate，可用原生 target）
 cargo run -p dict-compiler -- --input <src> --output <dest>
 
-# TSF crate 交叉编译 (必须在 WSL 中用 Windows target)
+# TSF crate 交叉编译（独立 workspace，同样需要 Windows target）
 cd crates/tsf
 cargo check --target x86_64-pc-windows-gnu
 cargo build --release --target x86_64-pc-windows-gnu
