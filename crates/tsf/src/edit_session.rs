@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::ffi::c_void;
 use std::rc::Rc;
 use std::sync::Mutex;
 
@@ -93,7 +94,9 @@ pub struct CompositionEditSession {
     composition: Rc<RefCell<Option<ITfComposition>>>,
     /// Tracked preedit text range for replacement without requiring StartComposition.
     preedit_range: Rc<RefCell<Option<ITfRange>>>,
-    sink: Option<ITfCompositionSink>,
+    /// Raw pointer to ITfCompositionSink — reconstructed as InterfaceRef in DoEditSession.
+    /// Valid for the lifetime of the synchronous edit session (TF_ES_SYNC).
+    sink_ptr: Option<*const c_void>,
 }
 
 impl CompositionEditSession {
@@ -102,7 +105,7 @@ impl CompositionEditSession {
         text: String,
         composition: Rc<RefCell<Option<ITfComposition>>>,
         preedit_range: Rc<RefCell<Option<ITfRange>>>,
-        sink: Option<ITfCompositionSink>,
+        sink_ptr: Option<*const c_void>,
     ) -> Self {
         Self {
             context,
@@ -110,7 +113,7 @@ impl CompositionEditSession {
             end_composition: false,
             composition,
             preedit_range,
-            sink,
+            sink_ptr,
         }
     }
 
@@ -126,7 +129,7 @@ impl CompositionEditSession {
             end_composition: true,
             composition,
             preedit_range,
-            sink: None,
+            sink_ptr: None,
         }
     }
 }
@@ -182,7 +185,14 @@ impl ITfEditSession_Impl for CompositionEditSession_Impl {
                 // StartComposition is attempted here; failure is logged but not fatal
                 // since text is already visible via SetText + preedit_range tracking.
                 if let Ok(ctx_comp) = self.context.cast::<ITfContextComposition>() {
-                    match unsafe { ctx_comp.StartComposition(ec, range, self.sink.as_ref()) } {
+                    // Reconstruct &ITfCompositionSink from raw pointer.
+                    // SAFETY: sink_ptr is a valid ITfCompositionSink COM pointer from PyrustTip,
+                    // valid for the lifetime of this synchronous edit session (TF_ES_SYNC).
+                    // ITfCompositionSink is #[repr(transparent)] over NonNull<c_void>,
+                    // same layout as *const c_void.
+                    let sink_ref: Option<&ITfCompositionSink> =
+                        self.sink_ptr.map(|p| unsafe { &*(p as *const ITfCompositionSink) });
+                    match unsafe { ctx_comp.StartComposition(ec, range, sink_ref) } {
                         Ok(comp) => {
                             tlog!("[tsf] CompositionEditSession: StartComposition SUCCESS");
                             *self.composition.borrow_mut() = Some(comp.clone());

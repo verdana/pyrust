@@ -292,6 +292,14 @@ impl PyrustTip_Impl {
         let comp_rc = Rc::clone(&self.composition);
         let pr_rc = Rc::clone(&self.preedit_range);
 
+        // Get raw pointer to ITfCompositionSink for StartComposition.
+        // SAFETY: self implements ITfCompositionSink. The pointer is valid for the
+        // lifetime of the synchronous edit session (TF_ES_SYNC).
+        let sink_ptr: Option<*const std::ffi::c_void> = {
+            let iref: windows::core::InterfaceRef<'_, ITfCompositionSink> = self.as_interface_ref();
+            Some(unsafe { std::mem::transmute(iref) })
+        };
+
         let result: WinResult<windows::core::BOOL> = match resp_rx.recv() {
             Some(crate::Response::ConsumedWithText(text)) => {
                 tlog!("[tsf] handle_keypress: ConsumedWithText '{}'", text);
@@ -300,7 +308,7 @@ impl PyrustTip_Impl {
                     text,
                     comp_rc,
                     pr_rc,
-                    None,
+                    sink_ptr,
                 )
                 .into();
                 if let Err(e) = unsafe {
@@ -317,7 +325,7 @@ impl PyrustTip_Impl {
                 *self.preedit_range.borrow_mut() = None;
                 let pr_rc2 = Rc::clone(&self.preedit_range);
                 let session: ITfEditSession =
-                    CompositionEditSession::update(context.clone(), preedit, comp_rc, pr_rc2, None)
+                    CompositionEditSession::update(context.clone(), preedit, comp_rc, pr_rc2, sink_ptr)
                         .into();
                 if let Err(e) = unsafe {
                     context.RequestEditSession(*self.client_id.borrow(), &session, flags)
